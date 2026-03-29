@@ -80,6 +80,44 @@ func (c *CachedClient) ListPullRequests() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// CommentsLoadedMsg is sent when PR comments are loaded.
+type CommentsLoadedMsg struct {
+	Comments []IssueComment
+	Number   int
+}
+
+// GetIssueComments returns a tea.Cmd that fetches PR comments with caching.
+func (c *CachedClient) GetIssueComments(number int) tea.Cmd {
+	key := fmt.Sprintf("comments:%d", number)
+	fetchFn := func() ([]IssueComment, error) {
+		return c.client.GetIssueComments(context.Background(), number)
+	}
+
+	data, found, _, refetchFn := cache.Query(c.cache, key, fetchFn)
+
+	var cmds []tea.Cmd
+
+	if found {
+		comments := data
+		cmds = append(cmds, func() tea.Msg {
+			return CommentsLoadedMsg{Comments: comments, Number: number}
+		})
+	}
+
+	if refetchFn != nil {
+		fn := refetchFn
+		cmds = append(cmds, func() tea.Msg {
+			result, err := fn()
+			if err != nil {
+				return QueryErrMsg{Err: err}
+			}
+			return CommentsLoadedMsg{Comments: result, Number: number}
+		})
+	}
+
+	return tea.Batch(cmds...)
+}
+
 // GetPullRequestFiles returns a tea.Cmd that fetches PR files with caching.
 func (c *CachedClient) GetPullRequestFiles(number int) tea.Cmd {
 	key := fmt.Sprintf("pull-files:%d", number)

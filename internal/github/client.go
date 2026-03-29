@@ -57,6 +57,16 @@ func (c *Client) GetPullRequest(ctx context.Context, number int) (PullRequest, e
 	return pr, nil
 }
 
+func (c *Client) GetIssueComments(ctx context.Context, number int) ([]IssueComment, error) {
+	var comments []IssueComment
+	path := fmt.Sprintf("repos/%s/%s/issues/%d/comments?per_page=100", c.owner, c.repo, number)
+	err := c.rest.Get(path, &comments)
+	if err != nil {
+		return nil, fmt.Errorf("getting comments for PR #%d: %w", number, err)
+	}
+	return comments, nil
+}
+
 func (c *Client) GetPullRequestFiles(ctx context.Context, number int) ([]PullRequestFile, error) {
 	var files []PullRequestFile
 	path := fmt.Sprintf("repos/%s/%s/pulls/%d/files?per_page=100", c.owner, c.repo, number)

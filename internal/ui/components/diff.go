@@ -37,7 +37,10 @@ type DiffLine struct {
 
 const gutterWidth = 4
 
-var fileNameStyle = lipgloss.NewStyle().Bold(true)
+var (
+	fileNameStyle = lipgloss.NewStyle().Bold(true)
+	borderStyle   = lipgloss.NewStyle().Foreground(lipgloss.BrightBlack)
+)
 
 // RenderDiffFile renders a single file's diff with full-width colored backgrounds.
 func RenderDiffFile(f github.PullRequestFile, fileContent string, width int, colors styles.DiffColors) string {
@@ -63,9 +66,10 @@ func RenderDiffFile(f github.PullRequestFile, fileContent string, width int, col
 	}
 
 	header := fileNameStyle.Render(name) + strings.Repeat(" ", gap) + adds + " " + dels
+	rule := borderStyle.Render(strings.Repeat("─", width))
 
 	if f.Patch == "" {
-		return header + "\n" + styles.SubtitleStyle.Render("(binary or empty)")
+		return header + "\n" + rule + "\n" + styles.SubtitleStyle.Render("(binary or empty)") + "\n" + rule
 	}
 
 	diffLines := parsePatchLines(f.Patch)
@@ -80,11 +84,14 @@ func RenderDiffFile(f github.PullRequestFile, fileContent string, width int, col
 	var b strings.Builder
 	b.WriteString(header)
 	b.WriteString("\n")
+	b.WriteString(rule)
+	b.WriteString("\n")
 	for _, dl := range diffLines {
 		b.WriteString(dl.Rendered)
 		b.WriteString("\n")
 	}
-	return strings.TrimRight(b.String(), "\n")
+	b.WriteString(rule)
+	return b.String()
 }
 
 // parsePatchLines parses a unified diff patch into structured DiffLines.

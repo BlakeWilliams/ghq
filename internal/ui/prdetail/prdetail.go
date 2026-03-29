@@ -47,6 +47,7 @@ type Model struct {
 	overviewVP    viewport.Model
 	overviewReady bool
 	descContent   string
+	comments      []github.IssueComment
 
 	// Code tab
 	codeVP         viewport.Model
@@ -102,7 +103,7 @@ func (m Model) Tab() string {
 
 func (m Model) Init() tea.Cmd {
 	body := m.pr.Body
-	width := m.width
+	width := m.width - 4 // border (2) + padding (2)
 	prNumber := m.pr.Number
 	return tea.Batch(
 		func() tea.Msg {
@@ -110,6 +111,7 @@ func (m Model) Init() tea.Cmd {
 			return descRenderedMsg{content: rendered, prNumber: prNumber}
 		},
 		m.client.GetPullRequestFiles(m.pr.Number),
+		m.client.GetIssueComments(m.pr.Number),
 	)
 }
 
@@ -123,7 +125,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.codeVP.SetWidth(m.width)
 		m.codeVP.SetHeight(m.height)
 		body := m.pr.Body
-		width := m.width
+		width := m.width - 4 // border + padding
 		prNumber := m.pr.Number
 		return m, func() tea.Msg {
 			rendered := renderMarkdown(body, width)
@@ -185,6 +187,18 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case descRenderedMsg:
 		if msg.prNumber == m.pr.Number {
 			m.descContent = msg.content
+			m.rebuildOverview()
+		}
+		return m, nil
+
+	case github.CommentsLoadedMsg:
+		if msg.Number == m.pr.Number {
+			// Reverse so newest comments appear first.
+			comments := msg.Comments
+			for i, j := 0, len(comments)-1; i < j; i, j = i+1, j-1 {
+				comments[i], comments[j] = comments[j], comments[i]
+			}
+			m.comments = comments
 			m.rebuildOverview()
 		}
 		return m, nil
@@ -262,24 +276,45 @@ func (m Model) View() string {
 func (m *Model) rebuildOverview() {
 	var content strings.Builder
 
-	content.WriteString("\n")
-	content.WriteString(styles.PRStatusBadge(m.pr.State, m.pr.Draft, m.pr.Merged))
-	content.WriteString(" ")
-	content.WriteString(m.renderMeta())
-	content.WriteString("\n")
+	// Description card with metadata in the top border.
+	meta := " " + styles.PRStatusBadge(m.pr.State, m.pr.Draft, m.pr.Merged) +
+		" " + m.renderMeta() + " "
 
+	metaWidth := lipgloss.Width(meta)
+	fillWidth := m.width - 2 - metaWidth - 1
+	if fillWidth < 0 {
+		fillWidth = 0
+	}
+	topBorder := borderColor.Render("╭─") + meta + borderColor.Render(strings.Repeat("─", fillWidth)+"╮")
+
+	// Title + description inside the card.
 	prURL := fmt.Sprintf("https://github.com/%s/pull/%d", m.client.RepoFullName(), m.pr.Number)
 	title := lipgloss.NewStyle().Bold(true).
 		UnderlineStyle(lipgloss.UnderlineDotted).
 		Hyperlink(prURL).
 		Render(fmt.Sprintf("#%d %s", m.pr.Number, m.pr.Title))
-	content.WriteString(title)
-	content.WriteString("\n\n")
 
-	content.WriteString(m.descContent)
+	descBody := m.descContent
+	if descBody == "" {
+		descBody = dimStyle.Render("No description provided.")
+	}
+	cardContent := title + "\n\n" + descBody
+	bottom := commentBodyStyle.Width(m.width).Render(cardContent)
 
-	if m.filesListLoaded && len(m.files) > 0 {
-		content.WriteString(m.renderFileSeparator())
+	content.WriteString("\n" + topBorder + "\n" + bottom)
+
+	if len(m.comments) > 0 {
+		label := fmt.Sprintf("%d comment", len(m.comments))
+		if len(m.comments) != 1 {
+			label += "s"
+		}
+		content.WriteString("\n\n")
+		content.WriteString("  " + lipgloss.NewStyle().Bold(true).Render(label))
+		content.WriteString("\n")
+
+		for _, c := range m.comments {
+			content.WriteString(m.renderComment(c))
+		}
 	}
 
 	if !m.overviewReady {
@@ -386,6 +421,57 @@ func (m Model) prefetchFiles(n int) []tea.Cmd {
 		})
 	}
 	return cmds
+}
+
+// --- Comments ---
+
+var (
+	commentBodyStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderTop(false).
+				BorderForeground(lipgloss.BrightBlack).
+				Padding(0, 1)
+
+	commentAuthor = lipgloss.NewStyle().Bold(true)
+	authorBadge   = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Black).
+			Background(lipgloss.Yellow)
+
+	borderColor = lipgloss.NewStyle().Foreground(lipgloss.BrightBlack)
+)
+
+func (m Model) renderComment(c github.IssueComment) string {
+	name := userStyle.
+		Hyperlink(fmt.Sprintf("https://github.com/%s", c.User.Login)).
+		Render("@" + c.User.Login)
+	author := commentAuthor.Render(name)
+
+	if c.User.Login == m.pr.User.Login {
+		author += " " + authorBadge.Render(" Author ")
+	}
+
+	age := dimStyle.Render(relativeTime(c.CreatedAt))
+	title := " " + author + " " + age + " "
+
+	// Build top border with title embedded: ╭─ @author 2d ───╮
+	// Chrome: ╭─ (2) + title + ─...─╮ (fill+1) = width
+	titleWidth := lipgloss.Width(title)
+	fillWidth := m.width - 2 - titleWidth - 1
+	if fillWidth < 0 {
+		fillWidth = 0
+	}
+	topBorder := borderColor.Render("╭─") + title + borderColor.Render(strings.Repeat("─", fillWidth)+"╮")
+
+	// Render body inside bottom border (no top border).
+	bodyWidth := m.width - 4 // border + padding
+	if bodyWidth < 20 {
+		bodyWidth = 20
+	}
+	body := renderMarkdown(c.Body, bodyWidth)
+	bottom := commentBodyStyle.Width(m.width).Render(body)
+
+	return "\n" + topBorder + "\n" + bottom
 }
 
 // --- Separator ---

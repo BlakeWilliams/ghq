@@ -60,22 +60,21 @@ var (
 	DiffLineNum = lipgloss.NewStyle().
 			Foreground(lipgloss.BrightBlack)
 
-	HeaderBar = lipgloss.NewStyle().
-			Background(lipgloss.Color("235"))
+	HeaderBar = lipgloss.NewStyle()
 
 	HeaderRepo = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Magenta).
-			Background(lipgloss.Color("235"))
+			Foreground(lipgloss.Cyan)
 
 	HeaderSep = lipgloss.NewStyle().
-			Foreground(lipgloss.BrightBlack).
-			Background(lipgloss.Color("235"))
+			Foreground(lipgloss.BrightBlack)
 
 	HeaderSection = lipgloss.NewStyle().
+			Foreground(lipgloss.BrightWhite)
+
+	HeaderActive = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.BrightWhite).
-			Background(lipgloss.Color("235"))
+			Foreground(lipgloss.BrightWhite)
 
 	StatusBar = lipgloss.NewStyle().
 			Foreground(lipgloss.BrightBlack)

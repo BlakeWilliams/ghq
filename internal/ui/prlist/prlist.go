@@ -232,6 +232,28 @@ func (m Model) View() string {
 		w = 80
 	}
 
+	// Loading state: skeleton rows matching actual PR row layout.
+	if len(m.list.Items()) == 0 {
+		dim := normalStyles.dim
+		innerW := w - 4
+		sepStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+		titleWidths := []int{25, 32, 18, 28, 22}
+
+		var loadingLines []string
+		for i := 0; i < 5; i++ {
+			line1 := dim.Render("  " + strings.Repeat("─", 4) + " " + strings.Repeat("─", titleWidths[i]))
+			line2 := dim.Render("  " + strings.Repeat("─", 8) + " " + strings.Repeat("─", 6) + " · " + strings.Repeat("─", 12))
+			loadingLines = append(loadingLines, padLine(line1, innerW, lipgloss.NewStyle()))
+			loadingLines = append(loadingLines, padLine(line2, innerW, lipgloss.NewStyle()))
+			if i < 4 {
+				loadingLines = append(loadingLines, sepStyle.Render(strings.Repeat("─", innerW)))
+			}
+		}
+		content := strings.Join(loadingLines, "\n")
+		bordered := listBorder.Render(content)
+		return dim.Render(" Loading...") + "\n" + bordered
+	}
+
 	// Inner width accounts for the border (1 char each side).
 	innerW := w - 2
 

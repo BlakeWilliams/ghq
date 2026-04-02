@@ -1248,7 +1248,7 @@ func (m Model) renderLayout(rightView string) string {
 	if m.currentFileIdx >= 0 && m.currentFileIdx < len(m.files) {
 		rightTitle = " " + lipgloss.NewStyle().Bold(true).Render(m.files[m.currentFileIdx].Filename) + " "
 	} else {
-		rightTitle = " " + lipgloss.NewStyle().Bold(true).Render("Conversation") + " "
+		rightTitle = " " + lipgloss.NewStyle().Bold(true).Render("Description") + " "
 	}
 	rtW := lipgloss.Width(rightTitle)
 	rtFill := rightW - 3 - rtW
@@ -1672,18 +1672,6 @@ func (m Model) buildOverviewContent(w int) string {
 	content.WriteString("\n" + indent(descBody, overviewPad))
 	content.WriteString("\n")
 
-	// Comments.
-	innerW := w - overviewPad*2
-	commentLines := m.buildCommentLines(innerW)
-	if len(commentLines) > 0 {
-		sep := dimStyle.Render(strings.Repeat("─", innerW))
-		content.WriteString("\n" + indent(sep, overviewPad) + "\n\n")
-		for _, cl := range commentLines {
-			content.WriteString(indent(cl, overviewPad) + "\n")
-			content.WriteString(indent(sep, overviewPad) + "\n\n")
-		}
-	}
-
 	return content.String()
 }
 
@@ -1701,7 +1689,16 @@ func (m *Model) buildFileContent(w int) string {
 		}
 		content.WriteString(rendered)
 	} else {
-		content.WriteString(dimStyle.Render("  " + iconLoading + " Loading " + m.files[idx].Filename + "..."))
+		// Skeleton diff lines.
+		for i := 0; i < 20; i++ {
+			gutter := dimStyle.Render(strings.Repeat("─", 10))
+			lineW := 15 + (i*7)%25
+			if lineW > w-12 {
+				lineW = w - 12
+			}
+			code := dimStyle.Render(strings.Repeat("─", lineW))
+			content.WriteString(gutter + " " + code + "\n")
+		}
 	}
 	// Trailing padding for scrollability.
 	content.WriteString("\n" + strings.Repeat("\n", m.height/2))

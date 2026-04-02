@@ -230,13 +230,12 @@ func (m Model) View() tea.View {
 
 func (m Model) renderHeader() string {
 	repo := styles.HeaderRepo.Render(m.ctx.Client.RepoFullName())
-	sep := styles.HeaderSep.Render("  ")
+	sep := styles.HeaderSep.Render(" / ")
 
-	pulls := styles.HeaderSection.Render("Pulls")
-	crumb := " " + repo + sep + pulls
+	crumb := " " + repo + sep + styles.HeaderSection.Render("Pulls")
 
 	if detail, ok := m.activeView.(prdetail.Model); ok {
-		crumb += sep + styles.HeaderSection.Render(fmt.Sprintf("#%d %s", detail.PRNumber(), detail.PRTitle()))
+		crumb += sep + styles.HeaderActive.Render(fmt.Sprintf("#%d %s", detail.PRNumber(), detail.PRTitle()))
 	}
 
 	return styles.HeaderBar.Width(m.width).Render(crumb)

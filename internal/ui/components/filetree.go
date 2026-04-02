@@ -16,7 +16,7 @@ const (
 	iconPlus     = "\U000f0415" // 󰐕 nf-md-plus
 	iconMinus    = "\U000f0374" // 󰍴 nf-md-minus
 	iconRename   = "\U000f0453" // 󰑓 nf-md-rename_box
-	iconConversation = "\U000f0219" // 󰈙 nf-md-file_document
+	iconDescription = "\U000f0219" // 󰈙 nf-md-file_document
 )
 
 var (
@@ -135,12 +135,20 @@ func BuildFileTree(files []github.PullRequestFile) []FileTreeEntry {
 
 // RenderFileTree renders the file tree as exactly `height` lines.
 // Each line is padded to `width`. The cursor is kept visible.
-// currentFileIdx of -1 means "Conversation" is the selected entry.
-// The first entry (index 0 in display) is always "Conversation".
+// currentFileIdx of -1 means "Description" is the selected entry.
+// The first entry (index 0 in display) is always "Description".
 // Tree entries start at display index 1.
 func RenderFileTree(entries []FileTreeEntry, files []github.PullRequestFile, cursor int, currentFileIdx int, width, height int) []string {
-	// Total display count: 1 (Conversation) + 1 (separator) + len(entries)
-	totalEntries := 2 + len(entries)
+	// If no entries yet, show skeleton file placeholders.
+	loading := len(entries) == 0
+	skeletonCount := 8
+	entryCount := len(entries)
+	if loading {
+		entryCount = skeletonCount
+	}
+
+	// Total display count: 1 (Description) + 1 (separator) + entries/skeletons
+	totalEntries := 2 + entryCount
 	lines := make([]string, height)
 
 	// Scroll window: keep cursor visible, centered when possible.
@@ -163,30 +171,44 @@ func RenderFileTree(entries []FileTreeEntry, files []github.PullRequestFile, cur
 		}
 
 		if idx == 0 {
-			// Conversation entry — bold with icon.
+			// Description entry — bold with icon.
 			isCursor := cursor == 0
 			isCurrent := currentFileIdx == -1
 			overviewStyle := lipgloss.NewStyle().Bold(true)
 			var line string
 			if isCursor {
-				line = treeSelected.Render(iconPointer + " " + iconConversation + " Conversation")
+				line = treeSelected.Render(iconPointer + " " + iconDescription + " Description")
 			} else if isCurrent {
-				line = overviewStyle.Foreground(lipgloss.Magenta).Render("  " + iconConversation + " Conversation")
+				line = overviewStyle.Foreground(lipgloss.Magenta).Render("  " + iconDescription + " Description")
 			} else {
-				line = overviewStyle.Render("  " + iconConversation + " Conversation")
+				line = overviewStyle.Render("  " + iconDescription + " Description")
 			}
 			lines[row] = padTo(line, width)
 			continue
 		}
 
 		if idx == 1 {
-			// Separator line between Conversation and files.
+			// Separator line between Description and files.
 			sep := treeDim.Render("  " + strings.Repeat("─", width-4))
 			lines[row] = padTo(sep, width)
 			continue
 		}
 
-		eIdx := idx - 2 // offset by 2 for Conversation + separator
+		eIdx := idx - 2 // offset by 2 for Description + separator
+
+		if loading {
+			// Skeleton file entry.
+			if eIdx >= skeletonCount {
+				lines[row] = strings.Repeat(" ", width)
+				continue
+			}
+			skeletonWidths := []int{12, 18, 10, 15, 20, 8, 14, 16}
+			sw := skeletonWidths[eIdx%len(skeletonWidths)]
+			line := "  " + treeDim.Render("  "+strings.Repeat("─", sw))
+			lines[row] = padTo(line, width)
+			continue
+		}
+
 		if eIdx >= len(entries) {
 			lines[row] = strings.Repeat(" ", width)
 			continue

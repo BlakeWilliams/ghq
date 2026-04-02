@@ -93,50 +93,9 @@ func HighlightDiffFile(f github.PullRequestFile, fileContent string, chromaStyle
 // This is cheap (no Chroma) and can be re-run on resize.
 func FormatDiffFile(hd HighlightedDiff, width int, colors styles.DiffColors, comments []github.ReviewComment) DiffRenderResult {
 	f := hd.File
-	name := f.Filename
-	if f.Status == "renamed" && f.PreviousFilename != "" {
-		name = f.PreviousFilename + " → " + f.Filename
-	}
-
-	adds := lipgloss.NewStyle().Foreground(lipgloss.Green).Render(fmt.Sprintf("+%d", f.Additions))
-	dels := lipgloss.NewStyle().Foreground(lipgloss.Red).Render(fmt.Sprintf("-%d", f.Deletions))
-	statsPlain := fmt.Sprintf("+%d -%d", f.Additions, f.Deletions)
-
-	nameMax := width - len(statsPlain) - 6
-	if nameMax < 0 {
-		nameMax = 0
-	}
-	if lipgloss.Width(name) > nameMax {
-		name = ansi.Truncate(name, nameMax-1, "…")
-	}
-
-	title := " " + fileNameStyle.Render(name) + " "
-	stats := " " + adds + " " + dels + " "
-	titleW := lipgloss.Width(title)
-	statsW := lipgloss.Width(stats)
-	leadW := 2
-	trailW := 1
-	fillW := width - leadW - titleW - statsW - trailW
-	if fillW < 0 {
-		fillW = 0
-	}
-	topBorder := borderStyle.Render("╭─") + title + borderStyle.Render(strings.Repeat("─", fillW)) + stats + borderStyle.Render("╮")
-	bw := width - 2
-	if bw < 0 {
-		bw = 0
-	}
-	bottomBorder := borderStyle.Render("╰" + strings.Repeat("─", bw) + "╯")
-	border := borderStyle.Render("│")
 
 	if f.Patch == "" {
-		body := styles.SubtitleStyle.Render("(binary or empty)")
-		line := border + " " + body + " " + border
-		return DiffRenderResult{Content: topBorder + "\n" + line + "\n" + bottomBorder}
-	}
-
-	innerW := width - 2
-	if innerW < 10 {
-		innerW = 10
+		return DiffRenderResult{Content: styles.SubtitleStyle.Render("(binary or empty)")}
 	}
 
 	// Make a working copy of diff lines so we don't mutate the cached highlight data.
@@ -144,24 +103,21 @@ func FormatDiffFile(hd HighlightedDiff, width int, colors styles.DiffColors, com
 	copy(diffLines, hd.DiffLines)
 
 	// Format each line at the target width using cached highlighted content.
-	formatDiffLinesFromHL(diffLines, hd.HlLines, hd.Filename, innerW, colors)
+	formatDiffLinesFromHL(diffLines, hd.HlLines, hd.Filename, width, colors)
 
 	commentsByLine := buildCommentThreads(comments)
 
 	var b strings.Builder
 	renderedLineIdx := 0
-	b.WriteString(topBorder)
-	b.WriteString("\n")
-	renderedLineIdx++
 
 	offsets := make([]int, len(diffLines))
 	for i, dl := range diffLines {
 		offsets[i] = renderedLineIdx
 
-		// Wrap the rendered line if it exceeds innerW.
-		segments := wrapRenderedLine(dl.Rendered, innerW, dl.Type, colors)
+		// Wrap the rendered line if it exceeds width.
+		segments := wrapRenderedLine(dl.Rendered, width, dl.Type, colors)
 		for _, seg := range segments {
-			b.WriteString(border + seg + border)
+			b.WriteString(seg)
 			b.WriteString("\n")
 			renderedLineIdx++
 		}
@@ -172,16 +128,15 @@ func FormatDiffFile(hd HighlightedDiff, width int, colors styles.DiffColors, com
 		}
 		if lineNo > 0 {
 			if threads, ok := commentsByLine[lineNo]; ok {
-				threadStr := renderCommentThread(threads, innerW, dl.Type, colors)
+				threadStr := renderCommentThread(threads, width, dl.Type, colors)
 				for _, tl := range strings.Split(strings.TrimRight(threadStr, "\n"), "\n") {
-					b.WriteString(border + tl + border + "\n")
+					b.WriteString(tl + "\n")
 					renderedLineIdx++
 				}
 			}
 		}
 	}
-	b.WriteString(bottomBorder)
-	return DiffRenderResult{Content: b.String(), DiffLineOffsets: offsets}
+	return DiffRenderResult{Content: strings.TrimRight(b.String(), "\n"), DiffLineOffsets: offsets}
 }
 
 // RenderDiffFile is a convenience that highlights and formats in one call.

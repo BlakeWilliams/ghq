@@ -16,7 +16,7 @@ const (
 	iconPlus     = "\U000f0415" // 󰐕 nf-md-plus
 	iconMinus    = "\U000f0374" // 󰍴 nf-md-minus
 	iconRename   = "\U000f0453" // 󰑓 nf-md-rename_box
-	iconOverview = "\U000f0219" // 󰈙 nf-md-file_document
+	iconConversation = "\U000f0219" // 󰈙 nf-md-file_document
 )
 
 var (
@@ -135,11 +135,11 @@ func BuildFileTree(files []github.PullRequestFile) []FileTreeEntry {
 
 // RenderFileTree renders the file tree as exactly `height` lines.
 // Each line is padded to `width`. The cursor is kept visible.
-// currentFileIdx of -1 means "Overview" is the selected entry.
-// The first entry (index 0 in display) is always "Overview".
+// currentFileIdx of -1 means "Conversation" is the selected entry.
+// The first entry (index 0 in display) is always "Conversation".
 // Tree entries start at display index 1.
 func RenderFileTree(entries []FileTreeEntry, files []github.PullRequestFile, cursor int, currentFileIdx int, width, height int) []string {
-	// Total display count: 1 (Overview) + 1 (separator) + len(entries)
+	// Total display count: 1 (Conversation) + 1 (separator) + len(entries)
 	totalEntries := 2 + len(entries)
 	lines := make([]string, height)
 
@@ -163,30 +163,30 @@ func RenderFileTree(entries []FileTreeEntry, files []github.PullRequestFile, cur
 		}
 
 		if idx == 0 {
-			// Overview entry — bold with icon.
+			// Conversation entry — bold with icon.
 			isCursor := cursor == 0
 			isCurrent := currentFileIdx == -1
 			overviewStyle := lipgloss.NewStyle().Bold(true)
 			var line string
 			if isCursor {
-				line = treeSelected.Render(iconPointer + " " + iconOverview + " Overview")
+				line = treeSelected.Render(iconPointer + " " + iconConversation + " Conversation")
 			} else if isCurrent {
-				line = overviewStyle.Foreground(lipgloss.Magenta).Render("  " + iconOverview + " Overview")
+				line = overviewStyle.Foreground(lipgloss.Magenta).Render("  " + iconConversation + " Conversation")
 			} else {
-				line = overviewStyle.Render("  " + iconOverview + " Overview")
+				line = overviewStyle.Render("  " + iconConversation + " Conversation")
 			}
 			lines[row] = padTo(line, width)
 			continue
 		}
 
 		if idx == 1 {
-			// Separator line between Overview and files.
+			// Separator line between Conversation and files.
 			sep := treeDim.Render("  " + strings.Repeat("─", width-4))
 			lines[row] = padTo(sep, width)
 			continue
 		}
 
-		eIdx := idx - 2 // offset by 2 for Overview + separator
+		eIdx := idx - 2 // offset by 2 for Conversation + separator
 		if eIdx >= len(entries) {
 			lines[row] = strings.Repeat(" ", width)
 			continue

@@ -175,9 +175,6 @@ func (m Model) StatusHints() (left, right []string) {
 	right = append(right, highlightHint("comments", "c"))
 	right = append(right, highlightHint("reviews", "r"))
 	right = append(right, highlightHint("checks", "s"))
-	if len(m.files) > 0 && m.currentFileIdx >= 0 {
-		right = append(right, fmt.Sprintf("%s %d/%d", iconFile, m.currentFileIdx+1, len(m.files)))
-	}
 	return
 }
 
@@ -540,11 +537,17 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 	case "G":
 		m.waitingG = false
 		m.activeViewport().GotoBottom()
+		if m.currentFileIdx >= 0 && m.hasDiffLines() {
+			m.syncDiffCursorToViewport()
+		}
 		return m, nil, true
 	case "g":
 		if m.waitingG {
 			m.waitingG = false
 			m.activeViewport().GotoTop()
+			if m.currentFileIdx >= 0 && m.hasDiffLines() {
+				m.syncDiffCursorToViewport()
+			}
 			return m, nil, true
 		}
 		m.waitingG = true
@@ -1200,29 +1203,105 @@ func (m Model) View() string {
 // renderLayout renders the tree + divider + right panel.
 func (m Model) renderLayout(rightView string) string {
 	treeW := m.treeWidth
-	dividerChar := "│"
-	var dividerStyle lipgloss.Style
-	if m.treeFocused {
-		dividerStyle = lipgloss.NewStyle().Foreground(lipgloss.Yellow)
-	} else {
-		dividerStyle = lipgloss.NewStyle().Foreground(lipgloss.BrightBlack)
-	}
-	divider := dividerStyle.Render(dividerChar)
+	innerTreeW := treeW - 2 // inside the │ side borders
+	innerTreeH := m.height - 2 // inside top/bottom borders
 
-	treeLines := components.RenderFileTree(m.treeEntries, m.files, m.treeCursor, m.currentFileIdx, treeW, m.height)
+	bc := m.borderStyle()
+	var borderFocused lipgloss.Style
+	if m.treeFocused {
+		borderFocused = lipgloss.NewStyle().Foreground(lipgloss.Yellow)
+	} else {
+		borderFocused = bc
+	}
+
+	// Build tree border frame.
+	titleStr := " " + lipgloss.NewStyle().Bold(true).Render("Files") + " "
+	titleW := lipgloss.Width(titleStr)
+	fillW := treeW - 3 - titleW // ╭─ + title + fill + ╮
+	if fillW < 0 {
+		fillW = 0
+	}
+	topBorder := borderFocused.Render("╭─") + titleStr + borderFocused.Render(strings.Repeat("─", fillW)+"╮")
+	bw := treeW - 2
+	if bw < 0 {
+		bw = 0
+	}
+	bottomBorder := borderFocused.Render("╰" + strings.Repeat("─", bw) + "╯")
+	sideBorderL := borderFocused.Render("│")
+	sideBorderR := borderFocused.Render("│")
+
+	treeContentLines := components.RenderFileTree(m.treeEntries, m.files, m.treeCursor, m.currentFileIdx, innerTreeW, innerTreeH)
 	rightLines := strings.Split(rightView, "\n")
+
+	// Right panel border.
+	rightW := m.rightPanelWidth()
+	innerRightW := rightW - 2
+	var rightBorderStyle lipgloss.Style
+	if !m.treeFocused {
+		rightBorderStyle = lipgloss.NewStyle().Foreground(lipgloss.Yellow)
+	} else {
+		rightBorderStyle = bc
+	}
+
+	// Right panel title.
+	var rightTitle string
+	if m.currentFileIdx >= 0 && m.currentFileIdx < len(m.files) {
+		rightTitle = " " + lipgloss.NewStyle().Bold(true).Render(m.files[m.currentFileIdx].Filename) + " "
+	} else {
+		rightTitle = " " + lipgloss.NewStyle().Bold(true).Render("Conversation") + " "
+	}
+	rtW := lipgloss.Width(rightTitle)
+	rtFill := rightW - 3 - rtW
+	if rtFill < 0 {
+		rtFill = 0
+	}
+	rightTop := rightBorderStyle.Render("╭─") + rightTitle + rightBorderStyle.Render(strings.Repeat("─", rtFill)+"╮")
+	rbw := rightW - 2
+	if rbw < 0 {
+		rbw = 0
+	}
+	rightBottom := rightBorderStyle.Render("╰" + strings.Repeat("─", rbw) + "╯")
+	rightSideL := rightBorderStyle.Render("│")
+	rightSideR := rightBorderStyle.Render("│")
 
 	var b strings.Builder
 	for i := 0; i < m.height; i++ {
-		tl := ""
-		if i < len(treeLines) {
-			tl = treeLines[i]
+		// Tree column.
+		var treeLine string
+		if i == 0 {
+			treeLine = topBorder
+		} else if i == m.height-1 {
+			treeLine = bottomBorder
+		} else {
+			tIdx := i - 1
+			cl := ""
+			if tIdx < len(treeContentLines) {
+				cl = treeContentLines[tIdx]
+			}
+			treeLine = sideBorderL + cl + sideBorderR
 		}
-		rl := ""
-		if i < len(rightLines) {
-			rl = rightLines[i]
+
+		// Right column.
+		var rightLine string
+		if i == 0 {
+			rightLine = rightTop
+		} else if i == m.height-1 {
+			rightLine = rightBottom
+		} else {
+			rIdx := i - 1
+			rl := ""
+			if rIdx < len(rightLines) {
+				rl = rightLines[rIdx]
+			}
+			// Pad to inner width.
+			rlW := lipgloss.Width(rl)
+			if rlW < innerRightW {
+				rl += strings.Repeat(" ", innerRightW-rlW)
+			}
+			rightLine = rightSideL + rl + rightSideR
 		}
-		b.WriteString(tl + divider + rl)
+
+		b.WriteString(treeLine + rightLine)
 		if i < m.height-1 {
 			b.WriteString("\n")
 		}
@@ -1550,21 +1629,22 @@ func (m Model) descWidth() int {
 }
 
 func (m *Model) rebuildContent() {
-	w := m.rightPanelWidth()
+	innerW := m.rightPanelInnerWidth()
+	innerH := m.height - 2 // inside top/bottom borders
 
 	if !m.vpReady {
 		m.vp = viewport.New()
 		m.vpReady = true
 	}
-	m.vp.SetWidth(w)
-	m.vp.SetHeight(m.height)
+	m.vp.SetWidth(innerW)
+	m.vp.SetHeight(innerH)
 
 	if m.currentFileIdx == -1 {
 		// Overview panel.
-		m.vp.SetContent(m.buildOverviewContent(w))
+		m.vp.SetContent(m.buildOverviewContent(innerW))
 	} else {
 		// Single file diff panel.
-		m.vp.SetContent(m.buildFileContent(w))
+		m.vp.SetContent(m.buildFileContent(innerW))
 	}
 }
 
@@ -1592,6 +1672,18 @@ func (m Model) buildOverviewContent(w int) string {
 	content.WriteString("\n" + indent(descBody, overviewPad))
 	content.WriteString("\n")
 
+	// Comments.
+	innerW := w - overviewPad*2
+	commentLines := m.buildCommentLines(innerW)
+	if len(commentLines) > 0 {
+		sep := dimStyle.Render(strings.Repeat("─", innerW))
+		content.WriteString("\n" + indent(sep, overviewPad) + "\n\n")
+		for _, cl := range commentLines {
+			content.WriteString(indent(cl, overviewPad) + "\n")
+			content.WriteString(indent(sep, overviewPad) + "\n\n")
+		}
+	}
+
 	return content.String()
 }
 
@@ -1617,12 +1709,18 @@ func (m *Model) buildFileContent(w int) string {
 	return content.String()
 }
 
+// rightPanelWidth returns the outer width of the right panel (including its borders).
 func (m Model) rightPanelWidth() int {
-	return m.width - m.treeWidth - 1 // -1 for divider
+	return m.width - m.treeWidth
+}
+
+// rightPanelInnerWidth returns the width available for content inside the right panel borders.
+func (m Model) rightPanelInnerWidth() int {
+	return m.rightPanelWidth() - 2
 }
 
 func (m Model) contentWidth() int {
-	return m.rightPanelWidth()
+	return m.rightPanelInnerWidth()
 }
 
 // --- Code tab ---

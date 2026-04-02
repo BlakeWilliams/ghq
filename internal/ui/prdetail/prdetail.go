@@ -800,6 +800,18 @@ func (m Model) handleCommentKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 		m.selectionAnchor = -1
 		m.rebuildContent()
 		return m, cmd, true
+	case "alt+s":
+		// Insert a suggestion block with the selected code.
+		suggestion := m.buildSuggestionBlock()
+		if suggestion != "" {
+			cur := m.commentInput.Value()
+			if cur != "" && !strings.HasSuffix(cur, "\n") {
+				cur += "\n"
+			}
+			m.commentInput.SetValue(cur + suggestion)
+			m.rebuildContent()
+		}
+		return m, nil, true
 	case "ctrl+g":
 		return m.openEditorForComment()
 	}
@@ -808,6 +820,41 @@ func (m Model) handleCommentKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 	m.commentInput, cmd = m.commentInput.Update(msg)
 	m.rebuildContent()
 	return m, cmd, true
+}
+
+// buildSuggestionBlock returns a GitHub suggestion fenced code block
+// pre-filled with the code from the commented line(s).
+func (m Model) buildSuggestionBlock() string {
+	idx := m.currentFileIdx
+	if idx < 0 || idx >= len(m.fileDiffs) {
+		return ""
+	}
+	lines := m.fileDiffs[idx]
+
+	selStart, selEnd := m.diffCursor, m.diffCursor
+	if m.selectionAnchor >= 0 && m.selectionAnchor != m.diffCursor {
+		selStart, selEnd = m.selectionAnchor, m.diffCursor
+		if selStart > selEnd {
+			selStart, selEnd = selEnd, selStart
+		}
+	}
+
+	var code []string
+	for i := selStart; i <= selEnd; i++ {
+		if i >= len(lines) {
+			continue
+		}
+		dl := lines[i]
+		if dl.Type == components.LineHunk {
+			continue
+		}
+		code = append(code, dl.Content)
+	}
+
+	if len(code) == 0 {
+		return "```suggestion\n```"
+	}
+	return "```suggestion\n" + strings.Join(code, "\n") + "\n```"
 }
 
 func (m Model) openEditorForComment() (Model, tea.Cmd, bool) {
@@ -979,16 +1026,7 @@ func (m Model) applyCursorHighlight(line string) string {
 		return line
 	}
 
-	// Split out the │ border prefix/suffix: \033[90m│\033[m (11 bytes each).
-	const borderLen = 11
-	prefix := ""
-	suffix := ""
-	inner := line
-	if len(line) >= borderLen*2 {
-		prefix = line[:borderLen]
-		suffix = line[len(line)-borderLen:]
-		inner = line[borderLen : len(line)-borderLen]
-	}
+	prefix, inner, suffix := splitDiffBorders(line)
 
 	// Replace the bold +/- gutter marker with >.
 	inner = strings.Replace(inner, "\033[1m+\033[0m", "\033[1m>\033[0m", 1)
@@ -1048,7 +1086,7 @@ func (m Model) renderCommentBox() string {
 	}
 	boxLines = append(boxLines, indent+bottomRule)
 
-	left := dimStyle.Render("esc cancel · ctrl+g $EDITOR")
+	left := dimStyle.Render("esc cancel · ctrl+g $EDITOR · alt+s suggest")
 	right := dimStyle.Render("alt+enter submit")
 	hintGap := boxW - lipgloss.Width(left) - lipgloss.Width(right)
 	if hintGap < 1 {
@@ -1240,15 +1278,7 @@ func (m Model) applySelectionHighlight(line string, dl components.DiffLine) stri
 		return line
 	}
 
-	const borderLen = 11
-	prefix := ""
-	suffix := ""
-	inner := line
-	if len(line) >= borderLen*2 {
-		prefix = line[:borderLen]
-		suffix = line[len(line)-borderLen:]
-		inner = line[borderLen : len(line)-borderLen]
-	}
+	prefix, inner, suffix := splitDiffBorders(line)
 
 	// Replace the bold +/- gutter marker with > to indicate selection.
 	inner = strings.Replace(inner, "\033[1m+\033[0m", "\033[1m>\033[0m", 1)
@@ -1278,6 +1308,43 @@ func (m Model) applySelectionHighlight(line string, dl components.DiffLine) stri
 	}
 
 	return prefix + inner + suffix
+}
+
+// splitDiffBorders splits a rendered diff line of the form
+// border + inner + border into its three parts. The border is a styled "│"
+// character whose ANSI byte length varies by terminal color profile, so we
+// locate the "│" characters instead of assuming a fixed byte offset.
+func splitDiffBorders(line string) (prefix, inner, suffix string) {
+	const borderChar = "│"
+
+	firstIdx := strings.Index(line, borderChar)
+	if firstIdx < 0 {
+		return "", line, ""
+	}
+
+	lastIdx := strings.LastIndex(line, borderChar)
+	if lastIdx == firstIdx {
+		return "", line, ""
+	}
+
+	// Prefix ends after the first │ and any trailing ANSI reset sequence.
+	prefixEnd := firstIdx + len(borderChar)
+	if prefixEnd < len(line) && line[prefixEnd] == '\033' {
+		if i := strings.IndexByte(line[prefixEnd:], 'm'); i >= 0 {
+			prefixEnd += i + 1
+		}
+	}
+
+	// Suffix starts at the ESC introducing the last │'s foreground sequence.
+	suffixStart := lastIdx
+	for i := lastIdx - 1; i >= prefixEnd; i-- {
+		if line[i] == '\033' {
+			suffixStart = i
+			break
+		}
+	}
+
+	return line[:prefixEnd], line[prefixEnd:suffixStart], line[suffixStart:]
 }
 
 func (m Model) renderWithLeftSidebarFrom(view string) string {

@@ -3,6 +3,7 @@ package prlist
 import (
 	"fmt"
 	"image/color"
+	"strconv"
 	"strings"
 	"time"
 
@@ -86,15 +87,38 @@ func relativeTime(t time.Time) string {
 	}
 }
 
-func renderLabels(labels []github.Label, s rowStyles) string {
+func renderLabels(labels []github.Label) string {
 	if len(labels) == 0 {
 		return ""
 	}
 	var parts []string
 	for _, l := range labels {
-		parts = append(parts, s.label.Render(l.Name))
+		bg := lipgloss.Color("#" + l.Color)
+		// Pick black or white foreground based on luminance.
+		fg := lipgloss.Color("#fff")
+		if isLightColor(l.Color) {
+			fg = lipgloss.Color("#000")
+		}
+		pill := lipgloss.NewStyle().
+			Background(bg).
+			Foreground(fg).
+			Padding(0, 1).
+			Render(l.Name)
+		parts = append(parts, pill)
 	}
-	return strings.Join(parts, s.dim.Render(" · "))
+	return strings.Join(parts, " ")
+}
+
+func isLightColor(hex string) bool {
+	if len(hex) != 6 {
+		return false
+	}
+	r, _ := strconv.ParseUint(hex[0:2], 16, 8)
+	g, _ := strconv.ParseUint(hex[2:4], 16, 8)
+	b, _ := strconv.ParseUint(hex[4:6], 16, 8)
+	// Relative luminance.
+	lum := 0.2126*float64(r)/255 + 0.7152*float64(g)/255 + 0.0722*float64(b)/255
+	return lum > 0.5
 }
 
 type Model struct {
@@ -269,7 +293,7 @@ func (m Model) View() string {
 		user := components.ColoredAuthor(pr.User.Login)
 		branch := s.dim.Render(pr.Head.Ref + " " + iconArrowRight + " " + pr.Base.Ref)
 		line2 := prefix + " " + user + " " + verb + s.dim.Render(" · ") + branch
-		if labels := renderLabels(pr.Labels, s); labels != "" {
+		if labels := renderLabels(pr.Labels); labels != "" {
 			line2 += s.dim.Render(" · ") + labels
 		}
 

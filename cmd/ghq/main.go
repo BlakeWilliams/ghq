@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"time"
@@ -12,7 +13,10 @@ import (
 )
 
 func main() {
-	client, err := github.NewClient()
+	nwo := flag.String("nwo", "", "repository in owner/repo format (defaults to current directory)")
+	flag.Parse()
+
+	client, err := github.NewClient(*nwo)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

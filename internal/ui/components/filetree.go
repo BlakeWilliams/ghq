@@ -11,11 +11,12 @@ import (
 )
 
 const (
-	iconFolder  = "\U000f024b" // 󰉋 nf-md-folder
-	iconPointer = "\U000f0142" // 󰅂 nf-md-chevron_right
-	iconPlus    = "\U000f0415" // 󰐕 nf-md-plus
-	iconMinus   = "\U000f0374" // 󰍴 nf-md-minus
-	iconRename  = "\U000f0453" // 󰑓 nf-md-rename_box
+	iconFolder   = "\U000f024b" // 󰉋 nf-md-folder
+	iconPointer  = "\U000f0142" // 󰅂 nf-md-chevron_right
+	iconPlus     = "\U000f0415" // 󰐕 nf-md-plus
+	iconMinus    = "\U000f0374" // 󰍴 nf-md-minus
+	iconRename   = "\U000f0453" // 󰑓 nf-md-rename_box
+	iconOverview = "\U000f0219" // 󰈙 nf-md-file_document
 )
 
 var (
@@ -35,74 +36,120 @@ type FileTreeEntry struct {
 	IsDir     bool
 }
 
-// BuildFileTree converts a flat list of changed files into a tree structure.
+// BuildFileTree converts a flat list of changed files into a tree structure
+// with common directory prefixes collapsed.
 func BuildFileTree(files []github.PullRequestFile) []FileTreeEntry {
-	type dirEntry struct {
-		name      string
-		fileIndex int
-	}
-	dirs := make(map[string][]dirEntry)
-	var dirNames []string
-
-	for i, f := range files {
-		dir := path.Dir(f.Filename)
-		base := path.Base(f.Filename)
-		if _, ok := dirs[dir]; !ok {
-			dirNames = append(dirNames, dir)
+	type treeNode struct {
+		name     string
+		children map[string]*treeNode
+		order    []string // insertion order of child keys
+		files    []struct {
+			name      string
+			fileIndex int
 		}
-		dirs[dir] = append(dirs[dir], dirEntry{name: base, fileIndex: i})
 	}
 
-	sort.Strings(dirNames)
+	root := &treeNode{children: make(map[string]*treeNode)}
 
+	// Build trie from file paths.
+	for i, f := range files {
+		parts := strings.Split(path.Dir(f.Filename), "/")
+		node := root
+		if parts[0] == "." {
+			parts = nil
+		}
+		for _, p := range parts {
+			if _, ok := node.children[p]; !ok {
+				node.children[p] = &treeNode{children: make(map[string]*treeNode)}
+				node.order = append(node.order, p)
+			}
+			node = node.children[p]
+		}
+		node.files = append(node.files, struct {
+			name      string
+			fileIndex int
+		}{name: path.Base(f.Filename), fileIndex: i})
+	}
+
+	// Collapse single-child directory chains: a/ -> b/ -> files becomes a/b/ -> files.
+	var collapse func(n *treeNode)
+	collapse = func(n *treeNode) {
+		for _, key := range n.order {
+			child := n.children[key]
+			collapse(child)
+		}
+		// If this node has exactly one child dir and no files, merge into parent.
+		for len(n.order) == 1 && len(n.files) == 0 {
+			childKey := n.order[0]
+			child := n.children[childKey]
+			// Merge child into this node under a combined name.
+			newKey := childKey
+			if len(child.order) == 1 && len(child.files) == 0 {
+				// Child is also a single-dir passthrough — combine names.
+				grandKey := child.order[0]
+				newKey = childKey + "/" + grandKey
+				grandchild := child.children[grandKey]
+				delete(n.children, childKey)
+				n.children[newKey] = grandchild
+				n.order = []string{newKey}
+			} else {
+				// Child has files or multiple subdirs — absorb it.
+				delete(n.children, childKey)
+				n.children[newKey] = child
+				n.order = []string{newKey}
+				break
+			}
+		}
+	}
+	collapse(root)
+
+	// Flatten trie into entries.
 	var entries []FileTreeEntry
-	for _, dir := range dirNames {
-		if dir != "." {
-			depth := strings.Count(dir, "/")
+	var walk func(n *treeNode, depth int)
+	walk = func(n *treeNode, depth int) {
+		// Sort child dirs.
+		sort.Strings(n.order)
+		for _, key := range n.order {
+			child := n.children[key]
 			entries = append(entries, FileTreeEntry{
 				FileIndex: -1,
-				Display:   dir + "/",
+				Display:   key + "/",
 				Depth:     depth,
 				IsDir:     true,
 			})
+			walk(child, depth+1)
 		}
-
-		for _, de := range dirs[dir] {
-			depth := 0
-			if dir != "." {
-				depth = strings.Count(dir, "/") + 1
-			}
+		// Files in this directory.
+		for _, f := range n.files {
 			entries = append(entries, FileTreeEntry{
-				FileIndex: de.fileIndex,
-				Display:   de.name,
+				FileIndex: f.fileIndex,
+				Display:   f.name,
 				Depth:     depth,
 			})
 		}
 	}
+	walk(root, 0)
 
 	return entries
 }
 
 // RenderFileTree renders the file tree as exactly `height` lines.
 // Each line is padded to `width`. The cursor is kept visible.
+// currentFileIdx of -1 means "Overview" is the selected entry.
+// The first entry (index 0 in display) is always "Overview".
+// Tree entries start at display index 1.
 func RenderFileTree(entries []FileTreeEntry, files []github.PullRequestFile, cursor int, currentFileIdx int, width, height int) []string {
+	// Total display count: 1 (Overview) + 1 (separator) + len(entries)
+	totalEntries := 2 + len(entries)
 	lines := make([]string, height)
-
-	if len(entries) == 0 {
-		lines[0] = padTo(treeDim.Render("  No files"), width)
-		for i := 1; i < height; i++ {
-			lines[i] = strings.Repeat(" ", width)
-		}
-		return lines
-	}
 
 	// Scroll window: keep cursor visible, centered when possible.
 	start := cursor - height/2
 	if start < 0 {
 		start = 0
 	}
-	if start+height > len(entries) {
-		start = len(entries) - height
+	if start+height > totalEntries {
+		start = totalEntries - height
 	}
 	if start < 0 {
 		start = 0
@@ -110,17 +157,47 @@ func RenderFileTree(entries []FileTreeEntry, files []github.PullRequestFile, cur
 
 	for row := 0; row < height; row++ {
 		idx := start + row
-		if idx >= len(entries) {
+		if idx >= totalEntries {
 			lines[row] = strings.Repeat(" ", width)
 			continue
 		}
 
-		e := entries[idx]
-		indent := strings.Repeat(" ", e.Depth)
+		if idx == 0 {
+			// Overview entry — bold with icon.
+			isCursor := cursor == 0
+			isCurrent := currentFileIdx == -1
+			overviewStyle := lipgloss.NewStyle().Bold(true)
+			var line string
+			if isCursor {
+				line = treeSelected.Render(iconPointer + " " + iconOverview + " Overview")
+			} else if isCurrent {
+				line = overviewStyle.Foreground(lipgloss.Magenta).Render("  " + iconOverview + " Overview")
+			} else {
+				line = overviewStyle.Render("  " + iconOverview + " Overview")
+			}
+			lines[row] = padTo(line, width)
+			continue
+		}
+
+		if idx == 1 {
+			// Separator line between Overview and files.
+			sep := treeDim.Render("  " + strings.Repeat("─", width-4))
+			lines[row] = padTo(sep, width)
+			continue
+		}
+
+		eIdx := idx - 2 // offset by 2 for Overview + separator
+		if eIdx >= len(entries) {
+			lines[row] = strings.Repeat(" ", width)
+			continue
+		}
+
+		e := entries[eIdx]
+		depthPad := strings.Repeat(" ", e.Depth*2)
 
 		var line string
 		if e.IsDir {
-			line = indent + treeDir.Render(iconFolder+" "+e.Display)
+			line = "  " + depthPad + treeDir.Render(iconFolder+" "+e.Display)
 		} else {
 			f := files[e.FileIndex]
 			isCurrent := e.FileIndex == currentFileIdx
@@ -147,7 +224,7 @@ func RenderFileTree(entries []FileTreeEntry, files []github.PullRequestFile, cur
 				name = treeFile.Render("  " + name)
 			}
 
-			line = indent + name + " " + stats
+			line = depthPad + name + " " + stats
 		}
 
 		lines[row] = padTo(line, width)

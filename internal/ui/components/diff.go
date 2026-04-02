@@ -157,9 +157,14 @@ func FormatDiffFile(hd HighlightedDiff, width int, colors styles.DiffColors, com
 	offsets := make([]int, len(diffLines))
 	for i, dl := range diffLines {
 		offsets[i] = renderedLineIdx
-		b.WriteString(border + dl.Rendered + border)
-		b.WriteString("\n")
-		renderedLineIdx++
+
+		// Wrap the rendered line if it exceeds innerW.
+		segments := wrapRenderedLine(dl.Rendered, innerW, dl.Type, colors)
+		for _, seg := range segments {
+			b.WriteString(border + seg + border)
+			b.WriteString("\n")
+			renderedLineIdx++
+		}
 
 		lineNo := dl.NewLineNo
 		if dl.Type == LineDel {
@@ -233,6 +238,17 @@ func ParsePatchLines(patch string) []DiffLine {
 // hlLines may be indexed by line number (full file highlight) or sequentially (fallback).
 // The function detects which mode based on whether line numbers in the diff lines
 // fall within the hlLines range.
+const tabWidth = 4
+
+// expandTabs replaces tab characters with spaces (tabWidth-aligned).
+// Works on strings that may contain ANSI escape codes.
+func expandTabs(s string) string {
+	if !strings.Contains(s, "\t") {
+		return s
+	}
+	return strings.ReplaceAll(s, "\t", strings.Repeat(" ", tabWidth))
+}
+
 func formatDiffLinesFromHL(diffLines []DiffLine, hlLines []string, filename string, width int, colors styles.DiffColors) {
 	// Detect if hlLines are indexed by line number (full file) or sequential (fallback).
 	// Full file mode: hlLines[lineNo-1] gives the highlighted line.
@@ -269,6 +285,7 @@ func formatDiffLinesFromHL(diffLines []DiffLine, hlLines []string, filename stri
 				hl = hlLines[hlIdx]
 				hlIdx++
 			}
+			hl = expandTabs(hl)
 			hl = injectBackground(hl, colors.AddBg)
 			gutter := colors.AddBg + colors.AddFg +
 				padNum(gutterWidth) + padNum(gutterWidth, dl.NewLineNo) +
@@ -278,12 +295,12 @@ func formatDiffLinesFromHL(diffLines []DiffLine, hlLines []string, filename stri
 		case LineDel:
 			var hl string
 			if useLineIndex {
-				// Del lines aren't in the new file — use snippet highlighting.
 				hl = highlightSnippet(dl.Content, filename, colors.ChromaStyle)
 			} else if hlIdx < len(hlLines) {
 				hl = hlLines[hlIdx]
 				hlIdx++
 			}
+			hl = expandTabs(hl)
 			hl = injectBackground(hl, colors.DelBg)
 			gutter := colors.DelBg + colors.DelFg +
 				padNum(gutterWidth, dl.OldLineNo) + padNum(gutterWidth) +
@@ -298,6 +315,7 @@ func formatDiffLinesFromHL(diffLines []DiffLine, hlLines []string, filename stri
 				hl = hlLines[hlIdx]
 				hlIdx++
 			}
+			hl = expandTabs(hl)
 			gutter := styles.DiffLineNum.Render(
 				padNum(gutterWidth, dl.OldLineNo) + padNum(gutterWidth, dl.NewLineNo) + " ",
 			)
@@ -308,7 +326,7 @@ func formatDiffLinesFromHL(diffLines []DiffLine, hlLines []string, filename stri
 
 // renderHunkLine renders a @@ hunk header with full-width background.
 func renderHunkLine(content string, width int, colors styles.DiffColors) string {
-	line := colors.HunkBg + colors.HunkFg + content
+	line := colors.HunkBg + colors.HunkFg + expandTabs(content)
 	return padWithBg(truncateLine(line, width), width, colors.HunkBg)
 }
 
@@ -322,6 +340,74 @@ func injectBackground(highlighted string, bgCode string) string {
 	s := strings.ReplaceAll(highlighted, "\033[0m", "\033[0m"+bgCode)
 	s = strings.ReplaceAll(s, "\033[m", "\033[m"+bgCode)
 	return s
+}
+
+// wrapRenderedLine splits a rendered diff line into multiple lines if it
+// exceeds the target width. The first segment keeps the original gutter;
+// continuation segments get a blank gutter with matching background.
+func wrapRenderedLine(rendered string, targetW int, lt LineType, colors styles.DiffColors) []string {
+	visW := lipgloss.Width(rendered)
+	if visW <= targetW {
+		return []string{rendered}
+	}
+
+	// Determine the background code for padding continuation lines.
+	var bgCode string
+	switch lt {
+	case LineAdd:
+		bgCode = colors.AddBg
+	case LineDel:
+		bgCode = colors.DelBg
+	case LineHunk:
+		bgCode = colors.HunkBg
+	}
+
+	gutterW := gutterWidth*2 + 2 // 10 visible chars
+	codeW := targetW - gutterW
+	if codeW < 10 {
+		codeW = 10
+	}
+
+	// First segment: full line truncated to targetW.
+	var segments []string
+	first := ansi.Truncate(rendered, targetW, "")
+	if bgCode != "" {
+		first = padWithBg(first, targetW, bgCode)
+	} else {
+		first = padToWidth(first, targetW)
+	}
+	segments = append(segments, first)
+
+	// Remaining code: cut everything after the first segment's visible chars.
+	// The gutter is part of the first targetW chars, so the overflow starts
+	// at visible position targetW.
+	remaining := ansi.Cut(rendered, targetW, visW)
+	for {
+		remainW := lipgloss.Width(remaining)
+		if remainW <= 0 {
+			break
+		}
+		contGutter := bgCode + strings.Repeat(" ", gutterW)
+		chunk := ansi.Truncate(remaining, codeW, "")
+		chunkW := lipgloss.Width(chunk)
+		if chunkW <= 0 {
+			break
+		}
+		line := contGutter + chunk
+		if bgCode != "" {
+			line = padWithBg(line, targetW, bgCode)
+		} else {
+			line = padToWidth(line, targetW)
+		}
+		segments = append(segments, line)
+
+		if chunkW >= remainW {
+			break
+		}
+		remaining = ansi.Cut(remaining, chunkW, remainW)
+	}
+
+	return segments
 }
 
 // padToWidth pads a line to targetWidth with spaces (no background color).
@@ -527,10 +613,11 @@ func renderCommentThread(comments []github.ReviewComment, width int, lt LineType
 	b.WriteString(emptyLine(bg, width))
 
 	for i, c := range comments {
-		author := " \033[1m@" + c.User.Login + "\033[0m "
+		authorStyled := ColoredAuthor(c.User.Login)
+		author := " " + authorStyled + "\033[0m" + bg + " "
 		ageStr := relativeTime(c.CreatedAt)
-		age := dimCode + ageStr + "\033[0m "
-		authorW := 1 + 1 + len(c.User.Login) + 1 // " @user "
+		age := dimCode + ageStr + "\033[0m" + bg + " "
+		authorW := 1 + lipgloss.Width(authorStyled) + 1 // " @user "
 		ageW := len(ageStr) + 1
 
 		var left, right string
@@ -547,7 +634,7 @@ func renderCommentThread(comments []github.ReviewComment, width int, lt LineType
 		if fillW < 0 {
 			fillW = 0
 		}
-		topLine := gutterStr + borderFg + left + "\033[0m" +
+		topLine := gutterStr + borderFg + left + "\033[0m" + bg +
 			author + age +
 			borderFg + strings.Repeat("─", fillW) + right + "\033[0m"
 		b.WriteString(padWithBg(topLine, width, bg))
@@ -565,7 +652,7 @@ func renderCommentThread(comments []github.ReviewComment, width int, lt LineType
 			if pad < 0 {
 				pad = 0
 			}
-			content := gutterStr + borderFg + "│" + "\033[0m" +
+			content := gutterStr + borderFg + "│" + "\033[0m" + bg +
 				" " + line + strings.Repeat(" ", pad) + " " +
 				borderFg + "│" + "\033[0m"
 			b.WriteString(padWithBg(content, width, bg))

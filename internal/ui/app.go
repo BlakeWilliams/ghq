@@ -127,7 +127,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case ":":
 			m.mode = modeCommand
 			return m, m.commandBar.Focus()
-		case "esc", "<":
+		case "<":
 			if len(m.history) > 0 {
 				return m.navigateBack()
 			}
@@ -250,6 +250,7 @@ func (m Model) renderStatusBar() string {
 		left = formatHints([]string{":  cmd", "/  filter", "enter  open"})
 	case prdetail.Model:
 		leftHints, rightHints := v.StatusHints()
+		leftHints = append([]string{styles.StatusBarKey.Render("<") + " " + styles.StatusBarHint.Render("back")}, leftHints...)
 		left = strings.Join(leftHints, sep)
 		right = strings.Join(rightHints, sep)
 	}

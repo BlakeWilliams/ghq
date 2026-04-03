@@ -122,12 +122,14 @@ func FormatDiffFile(hd HighlightedDiff, width int, colors styles.DiffColors, com
 			renderedLineIdx++
 		}
 
-		lineNo := dl.NewLineNo
+		var ck commentKey
 		if dl.Type == LineDel {
-			lineNo = dl.OldLineNo
+			ck = commentKey{Side: "LEFT", Line: dl.OldLineNo}
+		} else {
+			ck = commentKey{Side: "RIGHT", Line: dl.NewLineNo}
 		}
-		if lineNo > 0 {
-			if threads, ok := commentsByLine[lineNo]; ok {
+		if ck.Line > 0 {
+			if threads, ok := commentsByLine[ck]; ok {
 				threadStr := renderCommentThread(threads, width, dl.Type, colors)
 				for _, tl := range strings.Split(strings.TrimRight(threadStr, "\n"), "\n") {
 					b.WriteString(tl + "\n")
@@ -458,21 +460,25 @@ func truncateLine(s string, width int) string {
 	return ansi.Truncate(s, width, "")
 }
 
-// buildCommentThreads groups comments by the line they're attached to,
+// commentKey encodes side + line for comment thread lookup.
+type commentKey struct {
+	Side string // "LEFT" or "RIGHT"
+	Line int
+}
+
+// buildCommentThreads groups comments by (side, line),
 // threading replies under their parent.
-func buildCommentThreads(comments []github.ReviewComment) map[int][]github.ReviewComment {
+func buildCommentThreads(comments []github.ReviewComment) map[commentKey][]github.ReviewComment {
 	if len(comments) == 0 {
 		return nil
 	}
 
-	// First, collect root comments (no InReplyToID) keyed by their line.
-	// Then append replies after their root.
 	byID := make(map[int]*github.ReviewComment, len(comments))
 	for i := range comments {
 		byID[comments[i].ID] = &comments[i]
 	}
 
-	result := make(map[int][]github.ReviewComment)
+	result := make(map[commentKey][]github.ReviewComment)
 	// Add root comments first.
 	for _, c := range comments {
 		if c.InReplyToID != nil {
@@ -484,8 +490,13 @@ func buildCommentThreads(comments []github.ReviewComment) map[int][]github.Revie
 		} else if c.OriginalLine != nil {
 			line = *c.OriginalLine
 		}
+		side := c.Side
+		if side == "" {
+			side = "RIGHT"
+		}
 		if line > 0 {
-			result[line] = append(result[line], c)
+			key := commentKey{Side: side, Line: line}
+			result[key] = append(result[key], c)
 		}
 	}
 	// Add replies after their root.
@@ -493,12 +504,10 @@ func buildCommentThreads(comments []github.ReviewComment) map[int][]github.Revie
 		if c.InReplyToID == nil {
 			continue
 		}
-		// Find the root of the thread to get the line.
 		root := byID[*c.InReplyToID]
 		if root == nil {
 			continue
 		}
-		// Walk up to the actual root.
 		for root.InReplyToID != nil {
 			if parent, ok := byID[*root.InReplyToID]; ok {
 				root = parent
@@ -512,8 +521,13 @@ func buildCommentThreads(comments []github.ReviewComment) map[int][]github.Revie
 		} else if root.OriginalLine != nil {
 			line = *root.OriginalLine
 		}
+		side := root.Side
+		if side == "" {
+			side = "RIGHT"
+		}
 		if line > 0 {
-			result[line] = append(result[line], c)
+			key := commentKey{Side: side, Line: line}
+			result[key] = append(result[key], c)
 		}
 	}
 	return result

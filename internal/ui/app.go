@@ -12,11 +12,13 @@ import (
 	"github.com/blakewilliams/ghq/internal/ui/commandbar"
 	"github.com/blakewilliams/ghq/internal/ui/home"
 	"github.com/blakewilliams/ghq/internal/ui/localdiff"
+	"github.com/blakewilliams/ghq/internal/ui/picker"
 	"github.com/blakewilliams/ghq/internal/ui/prdetail"
 	"github.com/blakewilliams/ghq/internal/ui/prlist"
 	"github.com/blakewilliams/ghq/internal/ui/styles"
 	"github.com/blakewilliams/ghq/internal/ui/uictx"
 	tea "charm.land/bubbletea/v2"
+	xansi "github.com/charmbracelet/x/ansi"
 	"charm.land/lipgloss/v2"
 )
 
@@ -25,6 +27,7 @@ type inputMode int
 const (
 	modeNormal inputMode = iota
 	modeCommand
+	modePicker
 )
 
 const chromeHeight = 2
@@ -37,6 +40,7 @@ type Model struct {
 	forward    []uictx.View // forward stack (views we went back from)
 	mode       inputMode
 	commandBar commandbar.Model
+	picker     picker.Model
 	ctx        *uictx.Context
 	palette    terminal.Palette
 	repoRoot   string // local git repo root, if any
@@ -132,6 +136,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
+		// Picker mode owns all input.
+		if m.mode == modePicker {
+			var cmd tea.Cmd
+			m.picker, cmd = m.picker.Update(msg)
+			return m, cmd
+		}
+
 		// Delegate to active view first.
 		view, cmd, handled := m.activeView.HandleKey(msg)
 		if handled {
@@ -141,9 +152,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Global shortcuts (view didn't claim the key).
 		switch msg.String() {
-		case ":":
-			m.mode = modeCommand
-			return m, m.commandBar.Focus()
+		case ":", "ctrl+t":
+			m.mode = modePicker
+			m.picker = picker.New("Commands", m.commandPickerItems(), m.pickerInnerWidth(), m.height-chromeHeight)
+			return m, nil
+		case "?":
+			m.mode = modePicker
+			m.picker = picker.New("Help", m.helpPickerItems(), m.pickerInnerWidth(), m.height-chromeHeight)
+			return m, nil
 		case "<":
 			if len(m.history) > 0 {
 				return m.navigateBack()
@@ -154,10 +170,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case picker.ResultMsg:
+		m.mode = modeNormal
+		if msg.Selected && msg.Value != "" {
+			return m.handleCommand(commandbar.CommandMsg{Command: msg.Value})
+		}
+		// If no item was selected but query is a number, jump to that line
+		if !msg.Selected && msg.Value != "" {
+			if lineNo, err := strconv.Atoi(msg.Value); err == nil && lineNo > 0 {
+				var cmd tea.Cmd
+				m.activeView, cmd = m.activeView.Update(localdiff.GoToLineMsg{Line: lineNo})
+				return m, cmd
+			}
+		}
+		return m, nil
+
 	default:
 		if m.mode == modeCommand {
 			var cmd tea.Cmd
 			m.commandBar, cmd = m.commandBar.Update(msg)
+			return m, cmd
+		}
+		if m.mode == modePicker {
+			var cmd tea.Cmd
+			m.picker, cmd = m.picker.Update(msg)
 			return m, cmd
 		}
 
@@ -300,6 +336,11 @@ func (m Model) View() tea.View {
 
 	content := lipgloss.NewStyle().Height(contentHeight).Render(m.activeView.View())
 
+	// Overlay picker modal if open.
+	if m.mode == modePicker {
+		content = m.renderPickerOverlay(content, contentHeight)
+	}
+
 	var bar string
 	if m.mode == modeCommand {
 		bar = m.commandBar.View()
@@ -389,4 +430,141 @@ func formatHints(hints []string) string {
 
 func hint(key, desc string) string {
 	return styles.StatusBarKey.Render(key) + " " + styles.StatusBarHint.Render(desc)
+}
+
+func (m Model) commandPickerItems() []picker.Item {
+	items := []picker.Item{
+		{Label: "Inbox", Description: "Go to PR inbox", Value: "inbox", Keywords: []string{"home", "notifications"}},
+		{Label: "Refresh", Description: "Reload current view", Value: "refresh"},
+		{Label: "Quit", Description: "Exit ghq", Value: "quit", Keywords: []string{"exit", "close"}},
+	}
+	if m.repoRoot != "" {
+		items = append([]picker.Item{
+			{Label: "Local Diff", Description: "Local changes view", Value: "local", Keywords: []string{"diff", "changes", "working"}},
+			{Label: "Open PR", Description: "PR for current branch", Value: "pr", Keywords: []string{"pull request", "branch"}},
+		}, items...)
+	}
+	return items
+}
+
+func (m Model) helpPickerItems() []picker.Item {
+	// Global keys.
+	items := []picker.Item{
+		{Label: ":", Description: "Open command picker", Keywords: []string{"command", "menu"}},
+		{Label: "?", Description: "Open help", Keywords: []string{"keybindings", "shortcuts"}},
+		{Label: "<", Description: "Navigate back"},
+		{Label: ">", Description: "Navigate forward"},
+		{Label: "ctrl+c", Description: "Quit"},
+	}
+
+	// View-specific keys from the view itself.
+	for _, kb := range m.activeView.KeyBindings() {
+		items = append(items, picker.Item{
+			Label:       kb.Key,
+			Description: kb.Description,
+			Keywords:    kb.Keywords,
+		})
+	}
+
+	return items
+}
+
+func (m Model) pickerModalWidth() int {
+	w := m.width / 2
+	if w < 40 {
+		w = 40
+	}
+	if w > m.width-4 {
+		w = m.width - 4
+	}
+	return w
+}
+
+func (m Model) pickerInnerWidth() int {
+	return m.pickerModalWidth() - 4 // "│ " + " │"
+}
+
+// renderPickerOverlay renders the picker as a centered modal over the content.
+func (m Model) renderPickerOverlay(bg string, bgHeight int) string {
+	pickerView := m.picker.View()
+	pickerLines := strings.Split(pickerView, "\n")
+
+	modalW := m.pickerModalWidth()
+	innerW := m.pickerInnerWidth()
+	modalH := len(pickerLines) + 2
+
+	// Center vertically — bias toward top third.
+	padY := (bgHeight - modalH) / 3
+	if padY < 1 {
+		padY = 1
+	}
+
+	bc := lipgloss.NewStyle().Foreground(lipgloss.BrightBlack)
+
+	// Build borders.
+	titleStr := " " + lipgloss.NewStyle().Bold(true).Render(m.picker.Title()) + " "
+	titleW := lipgloss.Width(titleStr)
+	fillW := modalW - 3 - titleW
+	if fillW < 0 {
+		fillW = 0
+	}
+	topBorder := bc.Render("╭─") + titleStr + bc.Render(strings.Repeat("─", fillW)+"╮")
+	bw := modalW - 2
+	if bw < 0 {
+		bw = 0
+	}
+	bottomBorder := bc.Render("╰" + strings.Repeat("─", bw) + "╯")
+	side := bc.Render("│")
+
+	// Build modal lines.
+	var modalLines []string
+	modalLines = append(modalLines, topBorder)
+	for _, pl := range pickerLines {
+		plW := lipgloss.Width(pl)
+		pad := innerW - plW
+		if pad < 0 {
+			pad = 0
+		}
+		modalLines = append(modalLines, side+" "+pl+strings.Repeat(" ", pad)+" "+side)
+	}
+	modalLines = append(modalLines, bottomBorder)
+
+	// Splice modal onto background.
+	bgLines := strings.Split(bg, "\n")
+	padX := (m.width - modalW) / 2
+	rightStart := padX + modalW
+
+	for i, ml := range modalLines {
+		row := padY + i
+		if row >= 0 && row < len(bgLines) {
+			bgLine := bgLines[row]
+			bgW := lipgloss.Width(bgLine)
+
+			// Left side of background.
+			left := ""
+			if padX > 0 {
+				left = truncateVisible(bgLine, padX)
+				leftW := lipgloss.Width(left)
+				if leftW < padX {
+					left += strings.Repeat(" ", padX-leftW)
+				}
+			}
+
+			// Right side of background after the modal.
+			right := ""
+			if bgW > rightStart {
+				// Cut the background from rightStart onward.
+				right = xansi.Cut(bgLine, rightStart, bgW)
+			}
+
+			bgLines[row] = left + "\033[0m" + ml + "\033[0m" + right
+		}
+	}
+
+	return strings.Join(bgLines, "\n")
+}
+
+// truncateVisible truncates a string to n visible characters, preserving ANSI.
+func truncateVisible(s string, n int) string {
+	return xansi.Truncate(s, n, "")
 }

@@ -191,6 +191,14 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 	return m, cmd
 }
 
+func (m Model) KeyBindings() []uictx.KeyBinding {
+	return []uictx.KeyBinding{
+		{Key: "j / k", Description: "Move cursor down / up", Keywords: []string{"navigate"}},
+		{Key: "enter", Description: "Open selected PR"},
+		{Key: "/", Description: "Filter PRs", Keywords: []string{"search"}},
+	}
+}
+
 func (m Model) HandleKey(msg tea.KeyPressMsg) (uictx.View, tea.Cmd, bool) {
 	return m.handleKey(msg)
 }

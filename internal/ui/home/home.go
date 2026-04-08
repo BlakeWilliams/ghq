@@ -266,6 +266,16 @@ func (m Model) detectedRepo() string {
 	return r
 }
 
+func (m Model) KeyBindings() []uictx.KeyBinding {
+	return []uictx.KeyBinding{
+		{Key: "j / k", Description: "Move cursor down / up", Keywords: []string{"navigate"}},
+		{Key: "enter", Description: "Open selected PR"},
+		{Key: "tab", Description: "Toggle repo filter"},
+		{Key: "/", Description: "Filter PRs", Keywords: []string{"search"}},
+		{Key: "r", Description: "Refresh inbox"},
+	}
+}
+
 func (m Model) StatusHints() (left, right []string) {
 	left = append(left, styles.StatusBarKey.Render("r")+" "+styles.StatusBarHint.Render("refresh"))
 	if m.detectedRepo() != "" {

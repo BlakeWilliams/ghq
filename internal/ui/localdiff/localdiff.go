@@ -370,6 +370,7 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 		}
 
 		// Restore saved position from previous session.
+		savedOffset := m.vp.YOffset()
 		if m.savedFilename != "" {
 			m.restoreSavedPosition()
 		} else if m.currentFileIdx >= len(m.files) {
@@ -385,6 +386,10 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 		}
 
 		m.rebuildContent()
+		// Preserve scroll position on file-watcher reloads (not initial load).
+		if m.savedFilename == "" && savedOffset > 0 {
+			m.vp.SetYOffset(savedOffset)
+		}
 		if len(needHighlight) > 0 {
 			return m, m.highlightFileCmd(needHighlight[0])
 		}
@@ -414,7 +419,10 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 		}
 		m.highlightedFiles[msg.index] = msg.highlight
 		m.formatFile(msg.index)
-		m.rebuildContent()
+		// Only rebuild viewport if this is the file we're currently viewing.
+		if msg.index == m.currentFileIdx || m.currentFileIdx == -1 {
+			m.rebuildContent()
+		}
 		// Find the next file that needs highlighting.
 		for next := msg.index + 1; next < len(m.files); next++ {
 			if m.highlightedFiles[next].File.Filename == "" {
@@ -449,11 +457,14 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 					}
 				}
 			}
-			// Only re-render the affected file.
+			// Update the affected file's rendered cache.
 			if fileIdx := m.fileIndexForPath(pendingPath); fileIdx >= 0 {
 				m.formatFile(fileIdx)
+				// Only rebuild viewport if we're looking at this file.
+				if fileIdx == m.currentFileIdx {
+					m.rebuildContent()
+				}
 			}
-			m.rebuildContent()
 		} else if fileIdx := m.fileIndexForPath(m.copilotPendingPath); fileIdx >= 0 && fileIdx == m.currentFileIdx {
 			// Streaming delta — only re-render if we're looking at this file.
 			m.formatFile(fileIdx)
@@ -543,6 +554,11 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 	if m.threadCursor > 0 {
 		switch msg.String() {
 		case "j", "down":
+			// Scroll within a long comment before moving to the next one.
+			if m.commentExtendsBelow() {
+				m.vp.SetYOffset(m.vp.YOffset() + 1)
+				return m, nil, true
+			}
 			count := m.threadCommentCount()
 			if m.threadCursor < count {
 				m.threadCursor++
@@ -552,18 +568,28 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 			}
 			return m, nil, true
 		case "k", "up":
+			// Scroll within a long comment before moving to the previous one.
+			if m.commentExtendsAbove() {
+				m.vp.SetYOffset(m.vp.YOffset() - 1)
+				return m, nil, true
+			}
 			if m.threadCursor > 1 {
 				m.threadCursor--
 				m.formatFile(m.currentFileIdx)
 				m.rebuildContent()
-				m.scrollToThreadCursor()
+				m.scrollToThreadCursorBottom()
 			} else {
-				// Exit thread, back to diff line.
 				m.threadCursor = 0
 				m.formatFile(m.currentFileIdx)
 				m.rebuildContent()
 				m.scrollToDiffCursor()
 			}
+			return m, nil, true
+		case "ctrl+d":
+			m.vp.SetYOffset(m.vp.YOffset() + m.height/2)
+			return m, nil, true
+		case "ctrl+u":
+			m.vp.SetYOffset(m.vp.YOffset() - m.height/2)
 			return m, nil, true
 		case "esc":
 			m.threadCursor = 0
@@ -582,14 +608,13 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 			m.threadCursor = 0
 			return m, nil, true
 		case "enter":
-			// Exit thread mode.
 			m.threadCursor = 0
 			m.formatFile(m.currentFileIdx)
 			m.rebuildContent()
 			m.scrollToDiffCursor()
 			return m, nil, true
 		}
-		return m, nil, true // absorb all other keys in thread mode
+		return m, nil, true
 	}
 
 	// Clear selection on esc.
@@ -783,6 +808,27 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 }
 
 // StatusHints returns left and right hint groups for the status bar.
+func (m Model) KeyBindings() []uictx.KeyBinding {
+	return []uictx.KeyBinding{
+		{Key: "j / k", Description: "Move cursor down / up", Keywords: []string{"navigate"}},
+		{Key: "J / K", Description: "Extend selection range"},
+		{Key: "h / l", Description: "Focus left / right pane"},
+		{Key: "f", Description: "Toggle tree focus"},
+		{Key: "p / n", Description: "Previous / next file"},
+		{Key: "ctrl+d / u", Description: "Scroll half page down / up"},
+		{Key: "ctrl+f / b", Description: "Scroll full page down / up"},
+		{Key: "g g", Description: "Go to top"},
+		{Key: "G", Description: "Go to bottom"},
+		{Key: "m", Description: "Cycle diff mode (working/staged/branch)", Keywords: []string{"toggle"}},
+		{Key: "a", Description: "Add comment on current line"},
+		{Key: "enter", Description: "Select file / enter comment thread"},
+		{Key: "r", Description: "Reply to comment thread"},
+		{Key: "x", Description: "Resolve / unresolve thread"},
+		{Key: ":N", Description: "Jump to line number N"},
+		{Key: "esc", Description: "Cancel / exit thread"},
+	}
+}
+
 func (m Model) StatusHints() (left, right []string) {
 	if m.composing {
 		left = append(left, styles.StatusBarKey.Render("esc")+" "+styles.StatusBarHint.Render("cancel"))
@@ -1028,7 +1074,7 @@ func (m *Model) buildFileContent(w int) string {
 	} else {
 		// Skeleton.
 		for i := 0; i < 20; i++ {
-			gutter := dimStyle.Render(strings.Repeat("─", 10))
+			gutter := dimStyle.Render(strings.Repeat("─", components.TotalGutterWidth(components.DefaultGutterColWidth)))
 			lineW := 15 + (i*7)%25
 			if lineW > w-12 {
 				lineW = w - 12
@@ -1067,7 +1113,7 @@ func (m *Model) formatFile(index int) {
 	hl := m.highlightedFiles[index]
 	width := m.contentWidth()
 	colors := m.ctx.DiffColors
-	comments := m.commentsForFile(m.files[index].Filename)
+	comments := m.commentsForFile(index)
 
 	// Highlight the comment thread under the cursor.
 	var opts components.DiffFormatOptions
@@ -1106,14 +1152,21 @@ func (m *Model) formatFile(index int) {
 	}
 }
 
-func (m Model) commentsForFile(filename string) []github.ReviewComment {
-	if m.commentStore == nil {
+func (m Model) commentsForFile(fileIdx int) []github.ReviewComment {
+	if m.commentStore == nil || fileIdx < 0 || fileIdx >= len(m.files) {
 		return nil
 	}
+	filename := m.files[fileIdx].Filename
 	comments := m.commentStore.ForFile(filename)
 
 	// Wrap width for comment bodies inside the thread box.
-	wrapW := m.contentWidth() - 14 // gutter(10) + "│ " + " │"
+	var gutterW int
+	if fileIdx < len(m.fileDiffs) {
+		gutterW = components.TotalGutterWidth(components.GutterColWidth(m.fileDiffs[fileIdx]))
+	} else {
+		gutterW = components.TotalGutterWidth(components.DefaultGutterColWidth)
+	}
+	wrapW := m.contentWidth() - gutterW - 4 // gutter + "│ " + " │"
 	if wrapW < 20 {
 		wrapW = 20
 	}
@@ -1189,8 +1242,9 @@ func renderMarkdownBody(body string, width int, bg string) string {
 }
 
 // wordWrap splits a line into multiple lines at word boundaries to fit width.
+// Uses visible width (not byte length) so ANSI codes don't break wrapping.
 func wordWrap(line string, width int) []string {
-	if width <= 0 || len(line) <= width {
+	if width <= 0 || lipgloss.Width(line) <= width {
 		return []string{line}
 	}
 	words := strings.Fields(line)
@@ -1200,6 +1254,7 @@ func wordWrap(line string, width int) []string {
 	var lines []string
 	cur := words[0]
 	for _, w := range words[1:] {
+		// Use len here since we're working with plain text before ANSI is applied.
 		if len(cur)+1+len(w) > width {
 			lines = append(lines, cur)
 			cur = w
@@ -1276,6 +1331,11 @@ func (m Model) rightPanelInnerWidth() int {
 
 func (m Model) contentWidth() int {
 	return m.rightPanelInnerWidth()
+}
+
+// viewportHeight returns the actual visible height of the viewport (inside borders).
+func (m Model) viewportHeight() int {
+	return m.height - 2
 }
 
 func (m Model) borderStyle() lipgloss.Style {
@@ -1507,34 +1567,27 @@ func (m *Model) goToSourceLine(lineNo int) {
 	m.scrollToDiffCursor()
 }
 
-// threadCommentCount returns the number of comments in the thread on the current cursor line.
+// threadCommentCount returns the number of comments in the thread on the
+// current cursor line, consistent with what's actually rendered.
 func (m Model) threadCommentCount() int {
 	path, line, side, ok := m.cursorThreadInfo()
-	if !ok || m.commentStore == nil {
+	if !ok {
 		return 0
 	}
+	idx := m.currentFileIdx
+	if idx < 0 || idx >= len(m.fileCommentPositions) {
+		return 0
+	}
+	// Count from the rendered comment positions — this is the source of truth.
 	count := 0
-	rootID := ""
-	for _, c := range m.commentStore.Comments {
-		if c.Path == path && c.Line == line && c.Side == side && c.InReplyToID == "" && !c.Resolved {
-			rootID = c.ID
-			count++
-			break
-		}
-	}
-	if rootID == "" {
-		return 0
-	}
-	for _, c := range m.commentStore.Comments {
-		if c.InReplyToID == rootID && !c.Resolved {
+	for _, cp := range m.fileCommentPositions[idx] {
+		if cp.Line == line && cp.Side == side {
 			count++
 		}
 	}
+	_ = path
 	return count
 }
-
-// updateThreadCountForCursor is a no-op placeholder; threadCommentCount reads live.
-func (m *Model) updateThreadCountForCursor() {}
 
 // scrollToThreadCursor scrolls the viewport to show the selected comment
 // using the exact rendered positions tracked by CommentPositions.
@@ -1562,8 +1615,9 @@ func (m *Model) scrollToThreadCursor() {
 		return
 	}
 
+	vpH := m.viewportHeight()
 	top := m.vp.YOffset()
-	bottom := top + m.height - 1
+	bottom := top + vpH - 1
 
 	if targetLine < top+scrollMargin {
 		target := targetLine - scrollMargin
@@ -1572,7 +1626,111 @@ func (m *Model) scrollToThreadCursor() {
 		}
 		m.vp.SetYOffset(target)
 	} else if targetLine > bottom-scrollMargin {
-		m.vp.SetYOffset(targetLine - m.height + scrollMargin + 1)
+		m.vp.SetYOffset(targetLine - vpH + scrollMargin + 1)
+	}
+}
+
+// currentCommentRange returns the start and end rendered line offsets for
+// the currently selected comment (threadCursor). Returns (-1,-1) if unknown.
+func (m Model) currentCommentRange() (start, end int) {
+	idx := m.currentFileIdx
+	if idx < 0 || idx >= len(m.fileCommentPositions) {
+		return -1, -1
+	}
+	_, line, side, ok := m.cursorThreadInfo()
+	if !ok {
+		return -1, -1
+	}
+
+	// Find all positions for this thread.
+	var threadPositions []components.CommentPosition
+	for _, cp := range m.fileCommentPositions[idx] {
+		if cp.Line == line && cp.Side == side {
+			threadPositions = append(threadPositions, cp)
+		}
+	}
+
+	ci := m.threadCursor - 1
+	if ci < 0 || ci >= len(threadPositions) {
+		return -1, -1
+	}
+
+	start = threadPositions[ci].Offset
+	// End is the next comment's start, or estimate from the next diff line.
+	if ci+1 < len(threadPositions) {
+		end = threadPositions[ci+1].Offset - 1
+	} else {
+		// Last comment in thread — find where the thread ends.
+		// Use the next diff line's offset as the boundary.
+		if m.diffCursor+1 < len(m.fileDiffOffsets[idx]) {
+			end = m.fileDiffOffsets[idx][m.diffCursor+1] - 1
+		} else {
+			// Last diff line — estimate generously.
+			end = start + 50
+		}
+	}
+	return start, end
+}
+
+// commentExtendsBelow returns true if the selected comment's body extends
+// below the viewport (needs scrolling down to see the rest).
+func (m Model) commentExtendsBelow() bool {
+	_, end := m.currentCommentRange()
+	if end < 0 {
+		return false
+	}
+	vpH := m.viewportHeight()
+	bottom := m.vp.YOffset() + vpH - 1
+	return end > bottom
+}
+
+// commentExtendsAbove returns true if the selected comment's header is above
+// the viewport (needs scrolling up to see the top).
+func (m Model) commentExtendsAbove() bool {
+	start, _ := m.currentCommentRange()
+	if start < 0 {
+		return false
+	}
+	return start < m.vp.YOffset()
+}
+
+// scrollToThreadCursorBottom scrolls so the bottom of the comment is visible
+// (used when navigating up into a long comment).
+func (m *Model) scrollToThreadCursorBottom() {
+	_, end := m.currentCommentRange()
+	if end < 0 {
+		m.scrollToThreadCursor()
+		return
+	}
+	vpH := m.viewportHeight()
+	bottom := m.vp.YOffset() + vpH - 1
+	if end > bottom {
+		m.vp.SetYOffset(end - vpH + scrollMargin + 1)
+	}
+	// Also make sure the header is visible if the comment fits.
+	start, _ := m.currentCommentRange()
+	if start >= 0 && start < m.vp.YOffset() {
+		commentH := end - start + 1
+		if commentH <= vpH-scrollMargin*2 {
+			m.scrollToThreadCursor()
+		}
+	}
+}
+
+// scrollCommentBoxIntoView scrolls the viewport so the comment input box
+// (which is inserted after the cursor line) is fully visible.
+func (m *Model) scrollCommentBoxIntoView() {
+	idx := m.currentFileIdx
+	if idx < 0 || idx >= len(m.fileDiffOffsets) || m.diffCursor >= len(m.fileDiffOffsets[idx]) {
+		return
+	}
+	vpH := m.viewportHeight()
+	cursorLine := m.fileDiffOffsets[idx][m.diffCursor]
+	// The comment box is ~8 lines (border + textarea + hints) inserted after the cursor line.
+	boxBottom := cursorLine + 10
+	bottom := m.vp.YOffset() + vpH - 1
+	if boxBottom > bottom {
+		m.vp.SetYOffset(boxBottom - vpH + 1)
 	}
 }
 
@@ -1595,9 +1753,10 @@ func (m *Model) scrollToDiffCursor() {
 	if m.diffCursor >= len(m.fileDiffOffsets[idx]) {
 		return
 	}
+	vpH := m.viewportHeight()
 	absLine := m.fileDiffOffsets[idx][m.diffCursor]
 	top := m.vp.YOffset()
-	bottom := top + m.height - 1
+	bottom := top + vpH - 1
 
 	if absLine < top+scrollMargin {
 		target := absLine - scrollMargin
@@ -1606,7 +1765,7 @@ func (m *Model) scrollToDiffCursor() {
 		}
 		m.vp.SetYOffset(target)
 	} else if absLine > bottom-scrollMargin {
-		m.vp.SetYOffset(absLine - m.height + scrollMargin + 1)
+		m.vp.SetYOffset(absLine - vpH + scrollMargin + 1)
 	}
 }
 
@@ -1661,7 +1820,7 @@ func (m *Model) syncDiffCursorToViewport() {
 	if idx < 0 || idx >= len(m.fileDiffOffsets) || len(m.fileDiffOffsets[idx]) == 0 {
 		return
 	}
-	center := m.vp.YOffset() + m.height/2
+	center := m.vp.YOffset() + m.viewportHeight()/2
 	offsets := m.fileDiffOffsets[idx]
 	diffs := m.fileDiffs[idx]
 	best := -1
@@ -1716,7 +1875,7 @@ func (m Model) cursorViewportLine() int {
 	}
 	absLine := m.fileDiffOffsets[fileIdx][m.diffCursor]
 	rel := absLine - m.vp.YOffset()
-	if rel < 0 || rel >= m.height {
+	if rel < 0 || rel >= m.viewportHeight() {
 		return -1
 	}
 	return rel
@@ -1977,6 +2136,7 @@ func (m Model) openCommentInput() (Model, tea.Cmd, bool) {
 	m.commentInput = ta
 	m.composing = true
 	m.rebuildContent()
+	m.scrollCommentBoxIntoView()
 	return m, ta.Focus(), true
 }
 
@@ -2018,7 +2178,7 @@ func (m Model) insertCommentBox(rendered string, fileIdx int) string {
 }
 
 func (m Model) renderCommentBox() string {
-	const gutter = 10
+	gutter := components.TotalGutterWidth(components.GutterColWidth(m.fileDiffs[m.currentFileIdx]))
 	indent := strings.Repeat(" ", gutter)
 	boxW := m.contentWidth() - gutter - 2
 
@@ -2142,6 +2302,8 @@ func (m *Model) replyToThreadAtCursor() tea.Cmd {
 	m.commentInput = ta
 	m.composing = true
 	m.rebuildContent()
+	// Scroll to ensure the comment box is visible.
+	m.scrollCommentBoxIntoView()
 	return ta.Focus()
 }
 

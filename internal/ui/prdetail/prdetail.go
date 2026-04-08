@@ -163,6 +163,26 @@ func (m *Model) activeViewport() *viewport.Model {
 	return &m.vp
 }
 
+func (m Model) KeyBindings() []uictx.KeyBinding {
+	return []uictx.KeyBinding{
+		{Key: "j / k", Description: "Move cursor down / up", Keywords: []string{"navigate"}},
+		{Key: "J / K", Description: "Extend selection range"},
+		{Key: "h / l", Description: "Focus left / right pane"},
+		{Key: "f", Description: "Toggle tree focus"},
+		{Key: "p / n", Description: "Previous / next file"},
+		{Key: "ctrl+d / u", Description: "Scroll half page down / up"},
+		{Key: "ctrl+f / b", Description: "Scroll full page down / up"},
+		{Key: "g g", Description: "Go to top"},
+		{Key: "G", Description: "Go to bottom"},
+		{Key: "a", Description: "Add review comment"},
+		{Key: "enter", Description: "Select file / open comment"},
+		{Key: "c", Description: "Toggle comments sidebar"},
+		{Key: "r", Description: "Toggle reviews sidebar"},
+		{Key: "s", Description: "Toggle checks sidebar"},
+		{Key: "esc", Description: "Close sidebar / cancel"},
+	}
+}
+
 // StatusHints returns left and right hint groups for the status bar.
 // Entries are pre-rendered.
 func (m Model) StatusHints() (left, right []string) {
@@ -1124,7 +1144,7 @@ func (m Model) applyCursorHighlight(line string) string {
 // renderCommentBox renders the inline comment textarea with a rounded border
 // and hint line below, indented past the diff gutter.
 func (m Model) renderCommentBox() string {
-	const gutter = 10 // commentGutterWidth: padNum(4)*2 + 2
+	gutter := components.TotalGutterWidth(components.GutterColWidth(m.fileDiffs[m.currentFileIdx]))
 	indent := strings.Repeat(" ", gutter)
 	boxW := m.contentWidth() - gutter - 2
 

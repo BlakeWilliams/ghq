@@ -36,7 +36,31 @@ type DiffLine struct {
 	Rendered  string // fully rendered with gutter + syntax highlighting + bg
 }
 
-const gutterWidth = 4
+const DefaultGutterColWidth = 4
+
+// GutterColWidth returns the width needed for each line-number column,
+// using the default unless the diff has line numbers that need more space.
+func GutterColWidth(diffLines []DiffLine) int {
+	maxLine := 0
+	for _, dl := range diffLines {
+		if dl.OldLineNo > maxLine {
+			maxLine = dl.OldLineNo
+		}
+		if dl.NewLineNo > maxLine {
+			maxLine = dl.NewLineNo
+		}
+	}
+	w := len(strconv.Itoa(maxLine))
+	if w < DefaultGutterColWidth {
+		return DefaultGutterColWidth
+	}
+	return w
+}
+
+// TotalGutterWidth returns the full gutter width: two columns + separator + space + marker.
+func TotalGutterWidth(colW int) int {
+	return colW*2 + 3
+}
 
 var (
 	fileNameStyle = lipgloss.NewStyle().Bold(true)
@@ -127,8 +151,11 @@ func FormatDiffFile(hd HighlightedDiff, width int, colors styles.DiffColors, com
 	diffLines := make([]DiffLine, len(hd.DiffLines))
 	copy(diffLines, hd.DiffLines)
 
+	colW := GutterColWidth(diffLines)
+	gutterW := TotalGutterWidth(colW)
+
 	// Format each line at the target width using cached highlighted content.
-	formatDiffLinesFromHL(diffLines, hd.HlLines, hd.Filename, width, colors)
+	formatDiffLinesFromHL(diffLines, hd.HlLines, hd.Filename, width, colors, colW)
 
 	commentsByLine := buildCommentThreads(comments)
 
@@ -146,7 +173,7 @@ func FormatDiffFile(hd HighlightedDiff, width int, colors styles.DiffColors, com
 		offsets[i] = renderedLineIdx
 
 		// Wrap the rendered line if it exceeds width.
-		segments := wrapRenderedLine(dl.Rendered, width, dl.Type, colors)
+		segments := wrapRenderedLine(dl.Rendered, width, dl.Type, colors, gutterW)
 		for _, seg := range segments {
 			b.WriteString(seg)
 			b.WriteString("\n")
@@ -166,9 +193,9 @@ func FormatDiffFile(hd HighlightedDiff, width int, colors styles.DiffColors, com
 				if highlighted {
 					hlIdx = opt.HighlightCommentIndex
 				}
-				result := renderCommentThread(threads, width, dl.Type, colors, highlighted, hlIdx, colors.HighlightBorderFg, opt.RenderBody)
-				// Record comment positions.
-				lineInThread := 0
+				result := renderCommentThread(threads, width, dl.Type, colors, highlighted, hlIdx, colors.HighlightBorderFg, opt.RenderBody, gutterW)
+				// Record comment positions. Start at 1 to skip the blank line above the thread.
+				lineInThread := 1
 				for ci, cl := range result.commentLines {
 					positions = append(positions, CommentPosition{
 						Line:   ck.Line,
@@ -253,7 +280,7 @@ func expandTabs(s string) string {
 	return strings.ReplaceAll(s, "\t", strings.Repeat(" ", tabWidth))
 }
 
-func formatDiffLinesFromHL(diffLines []DiffLine, hlLines []string, filename string, width int, colors styles.DiffColors) {
+func formatDiffLinesFromHL(diffLines []DiffLine, hlLines []string, filename string, width int, colors styles.DiffColors, colW int) {
 	// Detect if hlLines are indexed by line number (full file) or sequential (fallback).
 	// Full file mode: hlLines[lineNo-1] gives the highlighted line.
 	// Fallback mode: hlLines are in diff order (including blank for hunks).
@@ -292,7 +319,7 @@ func formatDiffLinesFromHL(diffLines []DiffLine, hlLines []string, filename stri
 			hl = expandTabs(hl)
 			hl = injectBackground(hl, colors.AddBg)
 			gutter := colors.AddBg + colors.AddFg +
-				padNum(gutterWidth) + padNum(gutterWidth, dl.NewLineNo) +
+				padNum(colW) + " " + padNum(colW, dl.NewLineNo) +
 				" " + "\033[1m" + "+" + "\033[0m" + colors.AddBg
 			dl.Rendered = padWithBg(truncateLine(gutter+hl, width), width, colors.AddBg)
 
@@ -307,7 +334,7 @@ func formatDiffLinesFromHL(diffLines []DiffLine, hlLines []string, filename stri
 			hl = expandTabs(hl)
 			hl = injectBackground(hl, colors.DelBg)
 			gutter := colors.DelBg + colors.DelFg +
-				padNum(gutterWidth, dl.OldLineNo) + padNum(gutterWidth) +
+				padNum(colW, dl.OldLineNo) + " " + padNum(colW) +
 				" " + "\033[1m" + "-" + "\033[0m" + colors.DelBg
 			dl.Rendered = padWithBg(truncateLine(gutter+hl, width), width, colors.DelBg)
 
@@ -321,7 +348,7 @@ func formatDiffLinesFromHL(diffLines []DiffLine, hlLines []string, filename stri
 			}
 			hl = expandTabs(hl)
 			gutter := styles.DiffLineNum.Render(
-				padNum(gutterWidth, dl.OldLineNo) + padNum(gutterWidth, dl.NewLineNo) + " ",
+				padNum(colW, dl.OldLineNo) + " " + padNum(colW, dl.NewLineNo) + " ",
 			)
 			dl.Rendered = padToWidth(truncateLine(gutter+" "+hl, width), width)
 		}
@@ -349,7 +376,7 @@ func injectBackground(highlighted string, bgCode string) string {
 // wrapRenderedLine splits a rendered diff line into multiple lines if it
 // exceeds the target width. The first segment keeps the original gutter;
 // continuation segments get a blank gutter with matching background.
-func wrapRenderedLine(rendered string, targetW int, lt LineType, colors styles.DiffColors) []string {
+func wrapRenderedLine(rendered string, targetW int, lt LineType, colors styles.DiffColors, gutterW int) []string {
 	visW := lipgloss.Width(rendered)
 	if visW <= targetW {
 		return []string{rendered}
@@ -366,7 +393,7 @@ func wrapRenderedLine(rendered string, targetW int, lt LineType, colors styles.D
 		bgCode = colors.HunkBg
 	}
 
-	gutterW := gutterWidth*2 + 2 // 10 visible chars
+	// gutterW is passed in as total visible gutter width
 	codeW := targetW - gutterW
 	if codeW < 10 {
 		codeW = 10
@@ -596,13 +623,9 @@ func bgForLineType(lt LineType, colors styles.DiffColors) string {
 }
 
 
-// commentGutterWidth is the visible width of the gutter area in diff lines.
-// padNum(4) + padNum(4) + " " + marker(1) = 10 visible chars.
-const commentGutterWidth = gutterWidth*2 + 2
-
 // commentGutter renders an empty gutter matching the diff line style.
-func commentGutter(bg string) string {
-	return bg + strings.Repeat(" ", commentGutterWidth)
+func commentGutter(bg string, gutterW int) string {
+	return bg + strings.Repeat(" ", gutterW)
 }
 
 // emptyLine renders a full-width blank line with the given bg.
@@ -622,7 +645,7 @@ type commentThreadResult struct {
 
 // renderCommentThread renders a thread of review comments.
 // hlIdx: 0 = highlight whole thread (or none if !highlighted), >0 = highlight only that 1-indexed comment.
-func renderCommentThread(comments []github.ReviewComment, width int, lt LineType, colors styles.DiffColors, highlighted bool, hlIdx int, hlBorderFg string, renderBody func(string, int, string) string) commentThreadResult {
+func renderCommentThread(comments []github.ReviewComment, width int, lt LineType, colors styles.DiffColors, highlighted bool, hlIdx int, hlBorderFg string, renderBody func(string, int, string) string, gutterW int) commentThreadResult {
 	bg := bgForLineType(lt, colors)
 	defaultBorderFg := colors.BorderFg
 	// If highlighting the whole thread (hlIdx==0), use highlight color for all borders.
@@ -630,9 +653,9 @@ func renderCommentThread(comments []github.ReviewComment, width int, lt LineType
 	if highlighted && hlIdx == 0 {
 		threadBorderFg = hlBorderFg
 	}
-	gutterStr := commentGutter(bg)
+	gutterStr := commentGutter(bg, gutterW)
 	// Content area is everything after the gutter.
-	contentW := width - commentGutterWidth
+	contentW := width - gutterW
 	if contentW < 20 {
 		contentW = 20
 	}

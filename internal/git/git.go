@@ -2,6 +2,7 @@ package git
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -92,6 +93,7 @@ func Diff(dir string, mode DiffMode) (string, error) {
 	case DiffWorking:
 		args = []string{"-C", dir, "diff", "HEAD", "--no-color"}
 	case DiffStaged:
+		// Staged mode intentionally excludes untracked files.
 		args = []string{"-C", dir, "diff", "--cached", "--no-color"}
 	case DiffBranch:
 		defaultBranch, err := DefaultBranch(dir)
@@ -117,7 +119,56 @@ func Diff(dir string, mode DiffMode) (string, error) {
 		}
 		return "", fmt.Errorf("git diff: %w", err)
 	}
-	return string(out), nil
+	result := string(out)
+
+	// Append untracked files for working tree mode so they appear in the diff.
+	if mode == DiffWorking {
+		untracked, err := UntrackedFiles(dir)
+		if err == nil && len(untracked) > 0 {
+			result += untrackedDiff(dir, untracked)
+		}
+	}
+
+	return result, nil
+}
+
+// UntrackedFiles returns the list of untracked, non-ignored files in the repo.
+func UntrackedFiles(dir string) ([]string, error) {
+	cmd := exec.Command("git", "-C", dir, "ls-files", "--others", "--exclude-standard")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git ls-files: %w", err)
+	}
+	raw := strings.TrimSpace(string(out))
+	if raw == "" {
+		return nil, nil
+	}
+	return strings.Split(raw, "\n"), nil
+}
+
+// untrackedDiff synthesizes unified-diff output for untracked files so they
+// appear alongside tracked changes in the working tree view.
+func untrackedDiff(dir string, files []string) string {
+	var sb strings.Builder
+	for _, f := range files {
+		content, err := os.ReadFile(filepath.Join(dir, f))
+		if err != nil {
+			continue
+		}
+		lines := strings.Split(string(content), "\n")
+		// Drop trailing empty line from final newline split.
+		if len(lines) > 0 && lines[len(lines)-1] == "" {
+			lines = lines[:len(lines)-1]
+		}
+		sb.WriteString(fmt.Sprintf("diff --git a/%s b/%s\n", f, f))
+		sb.WriteString("new file mode 100644\n")
+		sb.WriteString(fmt.Sprintf("--- /dev/null\n+++ b/%s\n", f))
+		sb.WriteString(fmt.Sprintf("@@ -0,0 +1,%d @@\n", len(lines)))
+		for _, l := range lines {
+			sb.WriteString("+" + l + "\n")
+		}
+	}
+	return sb.String()
 }
 
 // FileContent reads a file from the working tree.

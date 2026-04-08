@@ -3,12 +3,14 @@ package ui
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/blakewilliams/ghq/internal/github"
 	"github.com/blakewilliams/ghq/internal/terminal"
 	"github.com/blakewilliams/ghq/internal/ui/commandbar"
 	"github.com/blakewilliams/ghq/internal/ui/home"
+	"github.com/blakewilliams/ghq/internal/ui/localdiff"
 	"github.com/blakewilliams/ghq/internal/ui/prdetail"
 	"github.com/blakewilliams/ghq/internal/ui/prlist"
 	"github.com/blakewilliams/ghq/internal/ui/styles"
@@ -36,17 +38,26 @@ type Model struct {
 	commandBar commandbar.Model
 	ctx        *uictx.Context
 	palette    terminal.Palette
+	repoRoot   string // local git repo root, if any
 	width      int
 	height     int
 }
 
-func NewApp(client *github.CachedClient, nwo string) Model {
+// NewApp creates and returns a new top-level UI model. If repoRoot is non-empty
+// and no GitHub repo (nwo) is specified, it opens directly to the local diff view.
+func NewApp(client *github.CachedClient, nwo string, repoRoot string) Model {
 	ctx := &uictx.Context{Client: client, NWO: nwo}
-	h := home.New(ctx, nwo)
+	var initialView uictx.View
+	if repoRoot != "" && nwo == "" {
+		initialView = localdiff.New(ctx, repoRoot, 0, 0)
+	} else {
+		initialView = home.New(ctx, nwo)
+	}
 	return Model{
-		activeView: h,
+		activeView: initialView,
 		commandBar: commandbar.New(),
 		ctx:        ctx,
+		repoRoot:   repoRoot,
 	}
 }
 
@@ -217,6 +228,13 @@ func (m Model) navigateForward() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleCommand(msg commandbar.CommandMsg) (tea.Model, tea.Cmd) {
+	// :N — jump to line number.
+	if lineNo, err := strconv.Atoi(msg.Command); err == nil && lineNo > 0 {
+		var cmd tea.Cmd
+		m.activeView, cmd = m.activeView.Update(localdiff.GoToLineMsg{Line: lineNo})
+		return m, cmd
+	}
+
 	switch msg.Command {
 	case "q", "quit":
 		return m, tea.Quit
@@ -225,9 +243,30 @@ func (m Model) handleCommand(msg commandbar.CommandMsg) (tea.Model, tea.Cmd) {
 			m.ctx.Client.InvalidateAll()
 			return m, m.ctx.Client.ListPullRequests()
 		}
+		if _, ok := m.activeView.(localdiff.Model); ok {
+			m.activeView = localdiff.New(m.ctx, m.repoRoot, m.width, m.height-chromeHeight)
+			return m, m.activeView.Init()
+		}
 	case "back":
 		if len(m.history) > 0 {
 			return m.navigateBack()
+		}
+	case "local":
+		if m.repoRoot != "" {
+			if _, ok := m.activeView.(localdiff.Model); !ok {
+				m.history = append(m.history, m.activeView)
+				m.forward = nil
+				m.activeView = localdiff.New(m.ctx, m.repoRoot, m.width, m.height-chromeHeight)
+				return m, m.activeView.Init()
+			}
+		}
+	case "inbox":
+		if _, ok := m.activeView.(localdiff.Model); ok {
+			m.history = append(m.history, m.activeView)
+			m.forward = nil
+			h := home.New(m.ctx, m.ctx.NWO)
+			m.activeView = h
+			return m, m.activeView.Init()
 		}
 	}
 	return m, nil
@@ -263,6 +302,10 @@ func (m Model) renderHeader() string {
 	switch m.activeView.(type) {
 	case home.Model:
 		crumb = " " + styles.HeaderActive.Render("Inbox")
+	case localdiff.Model:
+		detail := m.activeView.(localdiff.Model)
+		crumb = " " + styles.HeaderActive.Render("Local") + sep + styles.HeaderSection.Render(detail.BranchName()) +
+			sep + styles.HeaderActive.Render(detail.DiffMode().String())
 	case prlist.Model:
 		repo := styles.HeaderRepo.Render(m.ctx.Client.RepoFullName())
 		crumb = " " + repo + sep + styles.HeaderActive.Render("Pulls")
@@ -284,6 +327,11 @@ func (m Model) renderStatusBar() string {
 
 	switch v := m.activeView.(type) {
 	case home.Model:
+		leftHints, rightHints := v.StatusHints()
+		leftHints = append([]string{formatHints([]string{":  cmd"})}, leftHints...)
+		left = strings.Join(leftHints, sep)
+		right = strings.Join(rightHints, sep)
+	case localdiff.Model:
 		leftHints, rightHints := v.StatusHints()
 		leftHints = append([]string{formatHints([]string{":  cmd"})}, leftHints...)
 		left = strings.Join(leftHints, sep)

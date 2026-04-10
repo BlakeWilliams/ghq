@@ -92,6 +92,7 @@ type Model struct {
 	reviewComments []github.ReviewComment
 	checkRuns      []github.CheckRun
 	branchProt     *github.BranchProtection
+	currentUser    string // login of the authenticated user
 
 	// Files
 	files            []github.PullRequestFile
@@ -216,6 +217,7 @@ func (m Model) Init() tea.Cmd {
 		m.ctx.Client.GetReviewComments(m.pr.Number),
 		m.ctx.Client.GetCheckRuns(m.pr.Head.SHA),
 		m.ctx.Client.GetBranchProtection(m.pr.Base.Ref),
+		m.ctx.Client.GetCurrentUser(),
 	)
 }
 
@@ -320,6 +322,11 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 
 	case github.BranchProtectionLoadedMsg:
 		m.branchProt = msg.Protection
+		m.rebuildContent()
+		return m, nil
+
+	case github.CurrentUserLoadedMsg:
+		m.currentUser = msg.User.Login
 		m.rebuildContent()
 		return m, nil
 
@@ -2121,6 +2128,57 @@ func (m Model) buildBanners(w int) []alertBanner {
 		})
 	}
 
+	// Threads replying to you.
+	if m.currentUser != "" {
+		replyThreads := m.threadsReplyingToYou(m.currentUser)
+		if len(replyThreads) > 0 {
+			noun := "thread replying to you"
+			if len(replyThreads) > 1 {
+				noun = "threads replying to you"
+			}
+			title := fmt.Sprintf("%d %s", len(replyThreads), noun)
+			var details, links []string
+			var navs, diffNavs []int
+			for _, t := range replyThreads {
+				body := strings.ReplaceAll(t.body, "\n", " ")
+				if len(body) > 50 {
+					body = body[:47] + "..."
+				}
+				line := fmt.Sprintf("%s %s", iconComment, t.path)
+				if t.line > 0 {
+					line += fmt.Sprintf(":%d", t.line)
+				}
+				line += " · " + t.author + ": " + body
+				details = append(details, line)
+				links = append(links, "")
+
+				fileIdx := -1
+				diffIdx := -1
+				for i, f := range m.files {
+					if f.Filename == t.path {
+						fileIdx = i
+						if t.line > 0 && i < len(m.fileDiffs) {
+							for di, dl := range m.fileDiffs[i] {
+								if dl.NewLineNo == t.line {
+									diffIdx = di
+									break
+								}
+							}
+						}
+						break
+					}
+				}
+				navs = append(navs, fileIdx)
+				diffNavs = append(diffNavs, diffIdx)
+			}
+			banners = append(banners, alertBanner{
+				key: "replies", level: alertWarning, icon: iconComment, title: title,
+				expanded: m.expandedBanners["replies"], details: details, detailLinks: links,
+				fileNavs: navs, diffLineNavs: diffNavs,
+			})
+		}
+	}
+
 	// Ready to merge.
 	if len(failedChecks) == 0 && len(pendingChecks) == 0 && len(changesDetails) == 0 &&
 		len(unresolvedThreads) == 0 && len(m.pr.RequestedReviewers) == 0 &&
@@ -2229,6 +2287,88 @@ func (m Model) unresolvedThreadDetails() []unresolvedThread {
 			})
 		}
 	}
+	return result
+}
+
+type replyThread struct {
+	path   string
+	line   int
+	body   string // the comment waiting on you
+	author string // who wrote it
+}
+
+// threadsReplyingToYou finds threads where:
+// 1. You authored the root comment and someone else replied after you, OR
+// 2. Someone @mentioned you in a comment
+// AND you haven't responded after that comment.
+func (m Model) threadsReplyingToYou(login string) []replyThread {
+	// Build thread structure: root -> replies (in order).
+	type thread struct {
+		root    github.ReviewComment
+		replies []github.ReviewComment
+	}
+	threads := make(map[int]*thread)
+	var rootOrder []int
+
+	for _, rc := range m.reviewComments {
+		if rc.InReplyToID != nil {
+			if t, ok := threads[*rc.InReplyToID]; ok {
+				t.replies = append(t.replies, rc)
+			}
+		} else {
+			threads[rc.ID] = &thread{root: rc}
+			rootOrder = append(rootOrder, rc.ID)
+		}
+	}
+
+	mention := "@" + login
+	var result []replyThread
+
+	for _, rootID := range rootOrder {
+		t := threads[rootID]
+		allComments := append([]github.ReviewComment{t.root}, t.replies...)
+
+		// Find the latest comment that involves you:
+		// - you authored the root, or
+		// - someone @mentioned you
+		needsResponse := false
+		var triggerComment github.ReviewComment
+
+		for i := len(allComments) - 1; i >= 0; i-- {
+			c := allComments[i]
+			if c.User.Login == login {
+				// You already responded after any trigger — skip this thread.
+				needsResponse = false
+				break
+			}
+			if !needsResponse {
+				// Check if this comment triggers a response need.
+				if t.root.User.Login == login && i > 0 {
+					// You authored the root and someone else replied.
+					needsResponse = true
+					triggerComment = c
+				} else if strings.Contains(c.Body, mention) {
+					// You were @mentioned.
+					needsResponse = true
+					triggerComment = c
+				}
+			}
+		}
+
+		if needsResponse {
+			line := 0
+			if t.root.Line != nil {
+				line = *t.root.Line
+			}
+			result = append(result, replyThread{
+				path:   t.root.Path,
+				line:   line,
+				body:   triggerComment.Body,
+				author: triggerComment.User.Login,
+			})
+		}
+	}
+
 	return result
 }
 

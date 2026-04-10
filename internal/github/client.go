@@ -120,6 +120,15 @@ func (c *Client) GetCheckRuns(ctx context.Context, ref string) ([]CheckRun, erro
 	return result.CheckRuns, nil
 }
 
+func (c *Client) GetCurrentUser(ctx context.Context) (User, error) {
+	var user User
+	err := c.rest.Get("user", &user)
+	if err != nil {
+		return User{}, fmt.Errorf("getting current user: %w", err)
+	}
+	return user, nil
+}
+
 func (c *Client) GetBranchProtection(ctx context.Context, branch string) (*BranchProtection, error) {
 	var result BranchProtection
 	path := fmt.Sprintf("repos/%s/%s/branches/%s/protection", c.owner, c.repo, branch)

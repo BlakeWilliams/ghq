@@ -80,6 +80,42 @@ func (c *CachedClient) ListPullRequests() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// CurrentUserLoadedMsg is sent when the authenticated user is loaded.
+type CurrentUserLoadedMsg struct {
+	User User
+}
+
+// GetCurrentUser returns a tea.Cmd that fetches the authenticated user with caching.
+func (c *CachedClient) GetCurrentUser() tea.Cmd {
+	fetchFn := func() (User, error) {
+		return c.client.GetCurrentUser(context.Background())
+	}
+
+	data, found, _, refetchFn := cache.Query(c.cache, "current-user", fetchFn)
+
+	var cmds []tea.Cmd
+
+	if found {
+		user := data
+		cmds = append(cmds, func() tea.Msg {
+			return CurrentUserLoadedMsg{User: user}
+		})
+	}
+
+	if refetchFn != nil {
+		fn := refetchFn
+		cmds = append(cmds, func() tea.Msg {
+			result, err := fn()
+			if err != nil {
+				return QueryErrMsg{Err: err}
+			}
+			return CurrentUserLoadedMsg{User: result}
+		})
+	}
+
+	return tea.Batch(cmds...)
+}
+
 // ReviewsLoadedMsg is sent when PR reviews are loaded.
 type ReviewsLoadedMsg struct {
 	Reviews []Review

@@ -929,6 +929,9 @@ func (m Model) hasDiffLines() bool {
 }
 
 func (m *Model) moveDiffCursor(delta int) {
+	if m.currentFileIdx < 0 || m.currentFileIdx >= len(m.fileDiffs) {
+		return
+	}
 	lines := m.fileDiffs[m.currentFileIdx]
 	newPos := m.diffCursor + delta
 
@@ -950,6 +953,9 @@ func (m *Model) moveDiffCursor(delta int) {
 // moveDiffCursorBy jumps the diff cursor by delta lines, skipping hunks,
 // clamped to the current file. Also scrolls the viewport.
 func (m *Model) moveDiffCursorBy(delta int) {
+	if m.currentFileIdx < 0 || m.currentFileIdx >= len(m.fileDiffs) {
+		return
+	}
 	lines := m.fileDiffs[m.currentFileIdx]
 	newPos := m.diffCursor + delta
 
@@ -1265,7 +1271,7 @@ func (m Model) openEditorForComment() (Model, tea.Cmd, bool) {
 
 func (m Model) openCommentInput() (Model, tea.Cmd, bool) {
 	idx := m.currentFileIdx
-	if idx >= len(m.fileDiffs) {
+	if idx < 0 || idx >= len(m.fileDiffs) || idx >= len(m.files) {
 		return m, nil, false
 	}
 	lines := m.fileDiffs[idx]
@@ -1439,7 +1445,12 @@ func (m Model) applyCursorHighlight(line string) string {
 // renderCommentBox renders the inline comment textarea with a rounded border
 // and hint line below, indented past the diff gutter.
 func (m Model) renderCommentBox() string {
-	gutter := components.TotalGutterWidth(components.GutterColWidth(m.fileDiffs[m.currentFileIdx]))
+	var gutter int
+	if m.currentFileIdx >= 0 && m.currentFileIdx < len(m.fileDiffs) {
+		gutter = components.TotalGutterWidth(components.GutterColWidth(m.fileDiffs[m.currentFileIdx]))
+	} else {
+		gutter = components.TotalGutterWidth(components.DefaultGutterColWidth)
+	}
 	indent := strings.Repeat(" ", gutter)
 	boxW := m.contentWidth() - gutter - 2
 

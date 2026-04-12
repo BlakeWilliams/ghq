@@ -1638,7 +1638,7 @@ func (m *Model) selectTreeEntry() {
 	eIdx := m.treeCursor - 2
 	if eIdx >= 0 && eIdx < len(m.treeEntries) {
 		e := m.treeEntries[eIdx]
-		if !e.IsDir && e.FileIndex >= 0 {
+		if !e.IsDir && e.FileIndex >= 0 && e.FileIndex < len(m.files) && e.FileIndex < len(m.fileDiffs) {
 			m.currentFileIdx = e.FileIndex
 			// Restore cursor if we've been here before, otherwise start at top.
 			if saved, ok := m.fileCursors[m.files[e.FileIndex].Filename]; ok && saved < len(m.fileDiffs[e.FileIndex]) {
@@ -2769,7 +2769,7 @@ func (m Model) stageSelection(unstage bool) (Model, tea.Cmd, bool) {
 // stageHunk stages or unstages the entire hunk the cursor is in.
 func (m Model) stageHunk(unstage bool) (Model, tea.Cmd, bool) {
 	idx := m.currentFileIdx
-	if idx >= len(m.fileDiffs) || idx >= len(m.files) {
+	if idx < 0 || idx >= len(m.fileDiffs) || idx >= len(m.files) {
 		return m, nil, false
 	}
 

@@ -32,7 +32,12 @@ func main() {
 
 	repoRoot, _ := git.RepoRoot(".")
 
-	p := tea.NewProgram(ui.NewApp(cachedClient, *owner, *repo, repoRoot))
+	p := tea.NewProgram(ui.NewApp(ui.AppConfig{
+		Client:   cachedClient,
+		Owner:    *owner,
+		Repo:     *repo,
+		RepoRoot: repoRoot,
+	}))
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

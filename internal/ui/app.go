@@ -81,17 +81,24 @@ type Model struct {
 	height     int
 }
 
-// NewApp creates and returns a new top-level UI model. If repoRoot is non-empty
-// and no owner/repo is specified, it opens directly to the local diff view.
-func NewApp(client *github.CachedClient, owner, repo, repoRoot string) Model {
-	ctx := &uictx.Context{Client: client, Owner: owner, Repo: repo}
+// AppConfig holds the arguments for creating a new App.
+type AppConfig struct {
+	Client   *github.CachedClient
+	Owner    string
+	Repo     string
+	RepoRoot string // local git repo root, if any
+}
+
+// NewApp creates and returns a new top-level UI model.
+func NewApp(cfg AppConfig) Model {
+	ctx := &uictx.Context{Client: cfg.Client, Owner: cfg.Owner, Repo: cfg.Repo}
 	var initialView uictx.View
-	if repoRoot != "" && owner == "" {
-		initialView = localdiff.New(ctx, repoRoot, 0, 0)
+	if cfg.RepoRoot != "" && cfg.Owner == "" {
+		initialView = localdiff.New(ctx, cfg.RepoRoot, 0, 0)
 	} else {
 		nwo := ""
-		if owner != "" {
-			nwo = owner + "/" + repo
+		if cfg.Owner != "" {
+			nwo = cfg.Owner + "/" + cfg.Repo
 		}
 		initialView = home.New(ctx, nwo)
 	}
@@ -99,7 +106,7 @@ func NewApp(client *github.CachedClient, owner, repo, repoRoot string) Model {
 		activeView: initialView,
 		commandBar: commandbar.New(),
 		ctx:        ctx,
-		repoRoot:   repoRoot,
+		repoRoot:   cfg.RepoRoot,
 	}
 }
 

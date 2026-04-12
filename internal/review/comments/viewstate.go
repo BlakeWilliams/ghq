@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/blakewilliams/ghq/internal/git"
-	"github.com/blakewilliams/ghq/internal/persist"
+	"github.com/blakewilliams/ghq/internal/cache/persist"
 )
 
 // ViewState persists the user's position in the local diff view.

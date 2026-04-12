@@ -10,9 +10,9 @@ import (
 	"github.com/blakewilliams/ghq/internal/git"
 	"github.com/blakewilliams/ghq/internal/github"
 	"github.com/blakewilliams/ghq/internal/terminal"
-	"github.com/blakewilliams/ghq/internal/copilot"
+	"github.com/blakewilliams/ghq/internal/review/copilot"
 	"github.com/blakewilliams/ghq/internal/ui/commandbar"
-		"github.com/blakewilliams/ghq/internal/ui/home"
+		inboxui "github.com/blakewilliams/ghq/internal/inbox/ui"
 	"github.com/blakewilliams/ghq/internal/ui/localdiff"
 	"github.com/blakewilliams/ghq/internal/ui/picker"
 	"github.com/blakewilliams/ghq/internal/ui/prdetail"
@@ -100,7 +100,7 @@ func NewApp(cfg AppConfig) Model {
 		if cfg.Owner != "" {
 			nwo = cfg.Owner + "/" + cfg.Repo
 		}
-		initialView = home.New(ctx, nwo)
+		initialView = inboxui.New(ctx, nwo)
 	}
 	return Model{
 		activeView: initialView,
@@ -337,7 +337,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Now that we have the username, init the home view.
 		return m, m.activeView.Init()
 
-	case home.PRSelectedMsg:
+	case inboxui.PRSelectedMsg:
 		m.history = append(m.history, m.activeView)
 		m.forward = nil
 		return m, uictx.FetchPR(m.ctx.Client, msg.Owner, msg.Repo, msg.Number)
@@ -420,14 +420,14 @@ func (m Model) handleCommand(msg commandbar.CommandMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "inbox":
-		if _, ok := m.activeView.(home.Model); !ok {
+		if _, ok := m.activeView.(inboxui.Model); !ok {
 			m.history = append(m.history, m.activeView)
 			m.forward = nil
 			nwo := ""
 			if m.ctx.Owner != "" {
 				nwo = m.ctx.Owner + "/" + m.ctx.Repo
 			}
-			h := home.New(m.ctx, nwo)
+			h := inboxui.New(m.ctx, nwo)
 			m.activeView = h
 			resize := tea.WindowSizeMsg{Width: m.width, Height: m.height - chromeHeight}
 			m.activeView, _ = m.activeView.Update(resize)
@@ -504,7 +504,7 @@ func (m Model) renderHeader() string {
 	var crumb string
 
 	switch v := m.activeView.(type) {
-	case home.Model:
+	case inboxui.Model:
 		if repo != "" {
 			crumb = " " + styles.HeaderRepo.Render(repo) + sep + styles.HeaderActive.Render("Inbox")
 		} else {
@@ -542,7 +542,7 @@ func (m Model) renderStatusBar() string {
 	sep := styles.StatusBarHint.Render("  ")
 
 	switch v := m.activeView.(type) {
-	case home.Model:
+	case inboxui.Model:
 		leftHints, rightHints := v.StatusHints()
 		leftHints = append([]string{formatHints([]string{":  cmd"})}, leftHints...)
 		left = strings.Join(leftHints, sep)

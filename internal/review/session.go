@@ -4,7 +4,7 @@
 package review
 
 import (
-	"github.com/blakewilliams/ghq/internal/comments"
+	"github.com/blakewilliams/ghq/internal/review/comments"
 	"github.com/blakewilliams/ghq/internal/github"
 	"github.com/blakewilliams/ghq/internal/ui/components"
 	"github.com/blakewilliams/ghq/internal/ui/styles"

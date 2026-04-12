@@ -1,4 +1,4 @@
-package home
+package ui
 
 import (
 	"fmt"
@@ -9,7 +9,7 @@ import (
 	"github.com/blakewilliams/ghq/internal/github"
 	"github.com/blakewilliams/ghq/internal/inbox"
 	"github.com/blakewilliams/ghq/internal/notify"
-	"github.com/blakewilliams/ghq/internal/persist"
+	"github.com/blakewilliams/ghq/internal/cache/persist"
 	"github.com/blakewilliams/ghq/internal/ui/components"
 	"github.com/blakewilliams/ghq/internal/ui/styles"
 	"github.com/blakewilliams/ghq/internal/ui/uictx"

@@ -61,6 +61,15 @@ type SwitchModeMsg struct {
 	Mode git.DiffMode
 }
 
+// prDetectedMsg is a localdiff-internal message for PR auto-detection.
+// This is separate from uictx.PRLoadedMsg so the app doesn't intercept it.
+type prDetectedMsg struct {
+	PR github.PullRequest
+}
+
+// prDetectFailedMsg means no PR was found for this branch.
+type prDetectFailedMsg struct{}
+
 var dimStyle = lipgloss.NewStyle().Foreground(lipgloss.BrightBlack)
 
 type Model struct {
@@ -297,9 +306,17 @@ func (m Model) Init() tea.Cmd {
 	if m.copilot != nil {
 		cmds = append(cmds, m.copilot.ListenCmd())
 	}
-	// Auto-detect PR for this branch.
+	// Auto-detect PR for this branch (uses internal msg type so app doesn't intercept).
 	if !m.prLoaded {
-		cmds = append(cmds, uictx.FetchPRByBranch(m.ctx.Client, m.branch))
+		client := m.ctx.Client
+		branch := m.branch
+		cmds = append(cmds, func() tea.Msg {
+			pr, err := client.FetchPRByBranch(branch)
+			if err != nil {
+				return prDetectFailedMsg{}
+			}
+			return prDetectedMsg{PR: pr}
+		})
 	}
 	return tea.Batch(cmds...)
 }
@@ -471,16 +488,13 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 		m.savedSide = vs.Side
 		return m, m.loadDiff()
 
-	case uictx.PRLoadedMsg:
+	case prDetectedMsg:
 		m.pr = &msg.PR
 		m.prLoaded = true
 		return m, nil
 
-	case uictx.QueryErrMsg:
-		// Could be PR detection failure — just mark as checked.
-		if !m.prLoaded {
-			m.prLoaded = true
-		}
+	case prDetectFailedMsg:
+		m.prLoaded = true
 		return m, nil
 
 	case stageDoneMsg:

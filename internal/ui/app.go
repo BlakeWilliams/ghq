@@ -123,9 +123,8 @@ func NewApp(cfg AppConfig) Model {
 		// PR mode starts with inbox, then fetches the branch PR in Init.
 		m.activeView = inboxui.New(ctx, m.nwo())
 	default:
-		// No mode specified — will show startup picker after Init.
-		// Default to inbox as the initial view (picker overlays on top).
-		m.activeView = inboxui.New(ctx, m.nwo())
+		// No mode specified — show startup picker over blank screen.
+		m.activeView = nil
 	}
 
 	return m
@@ -195,7 +194,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.commandBar.SetWidth(msg.Width)
 		contentMsg := tea.WindowSizeMsg{Width: msg.Width, Height: msg.Height - chromeHeight}
 		var cmd tea.Cmd
-		m.activeView, cmd = m.activeView.Update(contentMsg)
+		if m.activeView != nil {
+			m.activeView, cmd = m.activeView.Update(contentMsg)
+		}
 		return m, cmd
 
 	case commandbar.CommandMsg:
@@ -252,10 +253,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Delegate to active view first.
-		view, cmd, handled := m.activeView.HandleKey(msg)
-		if handled {
-			m.activeView = view
-			return m, cmd
+		if m.activeView != nil {
+			view, cmd, handled := m.activeView.HandleKey(msg)
+			if handled {
+				m.activeView = view
+				return m, cmd
+			}
 		}
 
 		// Global shortcuts (view didn't claim the key).
@@ -399,9 +402,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	// Forward non-key messages to active view.
-	var cmd tea.Cmd
-	m.activeView, cmd = m.activeView.Update(msg)
-	return m, cmd
+	if m.activeView != nil {
+		var cmd tea.Cmd
+		m.activeView, cmd = m.activeView.Update(msg)
+		return m, cmd
+	}
+	return m, nil
 }
 
 func (m Model) navigateBack() (tea.Model, tea.Cmd) {
@@ -517,7 +523,11 @@ func (m Model) View() tea.View {
 		contentHeight = 0
 	}
 
-	content := lipgloss.NewStyle().Height(contentHeight).Render(m.activeView.View())
+	var viewContent string
+	if m.activeView != nil {
+		viewContent = m.activeView.View()
+	}
+	content := lipgloss.NewStyle().Height(contentHeight).Render(viewContent)
 
 	// Overlay modals if open.
 	if m.mode == modePicker {

@@ -203,12 +203,11 @@ func untrackedDiff(dir string, files []string) string {
 // FileContent reads a file from the working tree.
 func FileContent(dir string, path string) (string, error) {
 	fullPath := filepath.Join(dir, path)
-	cmd := exec.Command("cat", fullPath)
-	out, err := cmd.Output()
+	data, err := os.ReadFile(fullPath)
 	if err != nil {
 		return "", err
 	}
-	return string(out), nil
+	return string(data), nil
 }
 
 var diffHeaderRegex = regexp.MustCompile(`^diff --git a/(.*) b/(.*)`)
@@ -294,7 +293,7 @@ func DiffStat(dir string, mode DiffMode) (string, error) {
 	var args []string
 	switch mode {
 	case DiffWorking:
-		args = []string{"-C", dir, "diff", "HEAD", "--stat", "--no-color"}
+		args = []string{"-C", dir, "diff", "--stat", "--no-color"}
 	case DiffStaged:
 		args = []string{"-C", dir, "diff", "--cached", "--stat", "--no-color"}
 	case DiffBranch:
@@ -336,7 +335,7 @@ func NumStat(dir string, mode DiffMode) (map[string][2]int, error) {
 	var args []string
 	switch mode {
 	case DiffWorking:
-		args = []string{"-C", dir, "diff", "HEAD", "--numstat", "--no-color"}
+		args = []string{"-C", dir, "diff", "--numstat", "--no-color"}
 	case DiffStaged:
 		args = []string{"-C", dir, "diff", "--cached", "--numstat", "--no-color"}
 	case DiffBranch:

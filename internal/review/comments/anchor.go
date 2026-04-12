@@ -76,10 +76,6 @@ func AnchorComment(comment github.ReviewComment, localDiffs []components.DiffLin
 		} else if side == "RIGHT" && (dl.Type == components.LineAdd || dl.Type == components.LineContext) {
 			dist := abs(dl.NewLineNo - commentLine)
 			candidates = append(candidates, candidate{dl.NewLineNo, "RIGHT", dist})
-		} else if side == "RIGHT" && dl.Type == components.LineContext {
-			// Context lines appear on both sides.
-			dist := abs(dl.NewLineNo - commentLine)
-			candidates = append(candidates, candidate{dl.NewLineNo, "RIGHT", dist})
 		}
 	}
 

@@ -268,8 +268,16 @@ func New(pr github.PullRequest, ctx *uictx.Context, width, height int) Model {
 func (m *Model) SetLocalContext(repoRoot string) {
 	m.repoRoot = repoRoot
 	m.localBranch = true
+	// Close existing copilot client before creating a new one.
+	if m.copilotClient != nil {
+		m.copilotClient.Stop()
+	}
 	cp, _ := copilot.New(repoRoot)
 	m.copilotClient = cp
+	// Close existing watcher before creating a new one.
+	if m.refWatcher != nil {
+		m.refWatcher.Close()
+	}
 	// Watch for pushes to trigger PR re-fetch.
 	rw, _ := watcher.NewRefWatcher(repoRoot, m.pr.Head.Ref)
 	m.refWatcher = rw
@@ -515,8 +523,10 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 		if msg.Number == m.pr.Number {
 			m.composing = false
 			m.reviewComments = append(m.reviewComments, msg.Comment)
-			// Re-format to include the new comment (cheap).
-			m.reformatAllFiles()
+			// Re-format only the affected file to include the new comment.
+			if fileIdx := m.fileIndexForPath(msg.Comment.Path); fileIdx >= 0 {
+				m.formatFile(fileIdx)
+			}
 			m.rebuildContent()
 		}
 		return m, nil
@@ -1355,7 +1365,8 @@ func (m Model) findThreadRootOnLine(path string, line int) *int {
 			cLine = *c.OriginalLine
 		}
 		if cLine == line {
-			return &c.ID
+			id := c.ID
+			return &id
 		}
 	}
 	return nil

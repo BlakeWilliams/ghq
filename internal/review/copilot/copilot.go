@@ -47,6 +47,7 @@ type Client struct {
 	listenerAttached bool
 	lastSendAt       time.Time
 	log              *log.Logger
+	logFile          *os.File
 }
 
 // New creates and starts a Copilot client.
@@ -62,12 +63,13 @@ func New(repoRoot string) (*Client, error) {
 	})
 
 	c := &Client{
-		sdk:    sdkClient,
-		ctx:    ctx,
-		cancel: cancel,
-		ready:  make(chan struct{}),
-		events: make(chan tea.Msg, 100),
-		log:    logger,
+		sdk:     sdkClient,
+		ctx:     ctx,
+		cancel:  cancel,
+		ready:   make(chan struct{}),
+		events:  make(chan tea.Msg, 100),
+		log:     logger,
+		logFile: logFile,
 	}
 
 	go func() {
@@ -284,5 +286,8 @@ func (c *Client) Stop() {
 	}
 	if c.cancel != nil {
 		c.cancel()
+	}
+	if c.logFile != nil {
+		c.logFile.Close()
 	}
 }

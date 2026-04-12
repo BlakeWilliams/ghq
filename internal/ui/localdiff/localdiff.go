@@ -137,7 +137,10 @@ type Model struct {
 	savedSide     string
 
 	// Per-file cursor memory (session only, not persisted).
-	fileCursors map[int]int // fileIndex -> diffCursor
+	fileCursors map[string]int // filename -> diffCursor
+
+	// Fast filename->index lookup (rebuilt on diff load).
+	filePathIndex map[string]int
 
 	// Comment thread navigation: when > 0, cursor is inside a thread.
 	// 0 = on the diff line itself, 1 = first comment, 2 = second, etc.
@@ -178,7 +181,8 @@ func New(ctx *uictx.Context, repoRoot string, width, height int) Model {
 		commentStore:     comments.LoadComments(repoRoot),
 		copilot:          cp,
 		copilotReplyBuf:  make(map[string]string),
-		fileCursors:      make(map[int]int),
+		fileCursors:      make(map[string]int),
+		filePathIndex:    make(map[string]int),
 		savedFilename:    vs.Filename,
 		savedLineNo:      vs.LineNo,
 		savedSide:        vs.Side,
@@ -400,6 +404,7 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 		m.fileDiffs = make([][]components.DiffLine, len(msg.files))
 		m.fileDiffOffsets = make([][]int, len(msg.files))
 		m.fileCommentPositions = make([][]components.CommentPosition, len(msg.files))
+		m.rebuildFilePathIndex()
 		m.filesListLoaded = true
 
 		// Reuse cached highlights for files whose patch hasn't changed.
@@ -482,6 +487,7 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 		m.filesLoading = true
 		m.currentFileIdx = -1
 		m.treeCursor = 0
+		m.fileCursors = make(map[string]int)
 		vs := comments.LoadViewState(m.repoRoot, m.branch, m.mode)
 		m.savedFilename = vs.Filename
 		m.savedLineNo = vs.LineNo
@@ -1618,8 +1624,8 @@ func (m *Model) moveTreeCursorBy(delta int) {
 func (m *Model) selectTreeEntry() {
 	m.selectionAnchor = -1
 	// Save cursor position for the file we're leaving.
-	if m.currentFileIdx >= 0 {
-		m.fileCursors[m.currentFileIdx] = m.diffCursor
+	if m.currentFileIdx >= 0 && m.currentFileIdx < len(m.files) {
+		m.fileCursors[m.files[m.currentFileIdx].Filename] = m.diffCursor
 	}
 	m.threadCursor = 0
 	if m.treeCursor == 0 {
@@ -1635,7 +1641,7 @@ func (m *Model) selectTreeEntry() {
 		if !e.IsDir && e.FileIndex >= 0 {
 			m.currentFileIdx = e.FileIndex
 			// Restore cursor if we've been here before, otherwise start at top.
-			if saved, ok := m.fileCursors[e.FileIndex]; ok && saved < len(m.fileDiffs[e.FileIndex]) {
+			if saved, ok := m.fileCursors[m.files[e.FileIndex].Filename]; ok && saved < len(m.fileDiffs[e.FileIndex]) {
 				m.diffCursor = saved
 			} else {
 				m.diffCursor = m.firstNonHunkLine(e.FileIndex)
@@ -1669,6 +1675,9 @@ func (m Model) hasDiffLines() bool {
 }
 
 func (m *Model) moveDiffCursor(delta int) {
+	if m.currentFileIdx < 0 || m.currentFileIdx >= len(m.fileDiffs) {
+		return
+	}
 	m.threadCursor = 0
 	lines := m.fileDiffs[m.currentFileIdx]
 	oldPos := m.diffCursor
@@ -1715,6 +1724,9 @@ func (m Model) lineHasComments(diffIdx int) bool {
 }
 
 func (m *Model) moveDiffCursorBy(delta int) {
+	if m.currentFileIdx < 0 || m.currentFileIdx >= len(m.fileDiffs) {
+		return
+	}
 	m.threadCursor = 0
 	lines := m.fileDiffs[m.currentFileIdx]
 	newPos := m.diffCursor + delta
@@ -2279,7 +2291,7 @@ func (m Model) handleCommentKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 
 func (m Model) openCommentInput() (Model, tea.Cmd, bool) {
 	idx := m.currentFileIdx
-	if idx >= len(m.fileDiffs) {
+	if idx < 0 || idx >= len(m.fileDiffs) || idx >= len(m.files) {
 		return m, nil, false
 	}
 	lines := m.fileDiffs[idx]
@@ -2659,12 +2671,17 @@ func (m Model) buildViewPickerItems() []picker.Item {
 }
 
 func (m Model) fileIndexForPath(path string) int {
-	for i, f := range m.files {
-		if f.Filename == path {
-			return i
-		}
+	if idx, ok := m.filePathIndex[path]; ok {
+		return idx
 	}
 	return -1
+}
+
+func (m *Model) rebuildFilePathIndex() {
+	m.filePathIndex = make(map[string]int, len(m.files))
+	for i, f := range m.files {
+		m.filePathIndex[f.Filename] = i
+	}
 }
 
 type stageDoneMsg struct{}
@@ -2672,7 +2689,7 @@ type stageDoneMsg struct{}
 // stageWholeFile stages an entire file using the appropriate git command.
 func (m Model) stageWholeFile(unstage bool) (Model, tea.Cmd, bool) {
 	idx := m.currentFileIdx
-	if idx >= len(m.files) {
+	if idx < 0 || idx >= len(m.files) || idx >= len(m.fileDiffs) {
 		return m, nil, false
 	}
 	filename := m.files[idx].Filename
@@ -2699,7 +2716,7 @@ func (m Model) stageWholeFile(unstage bool) (Model, tea.Cmd, bool) {
 // stageSelection stages or unstages the current line or J/K selection range.
 func (m Model) stageSelection(unstage bool) (Model, tea.Cmd, bool) {
 	idx := m.currentFileIdx
-	if idx >= len(m.fileDiffs) || idx >= len(m.files) {
+	if idx < 0 || idx >= len(m.fileDiffs) || idx >= len(m.files) {
 		return m, nil, false
 	}
 
@@ -2829,6 +2846,8 @@ func (m *Model) removeDiffLines(fileIdx, start, end int) {
 		m.fileDiffOffsets = append(m.fileDiffOffsets[:fileIdx], m.fileDiffOffsets[fileIdx+1:]...)
 		m.fileCommentPositions = append(m.fileCommentPositions[:fileIdx], m.fileCommentPositions[fileIdx+1:]...)
 		m.treeEntries = components.BuildFileTree(m.files)
+		m.selectionAnchor = -1
+		m.rebuildFilePathIndex()
 
 		// Navigate away from the removed file.
 		if len(m.files) == 0 {

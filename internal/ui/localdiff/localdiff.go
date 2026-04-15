@@ -653,7 +653,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 			count := m.threadCommentCount()
 			if m.dv.ThreadCursor < count {
 				m.dv.ThreadCursor++
-				m.formatFile(m.dv.CurrentFileIdx)
+				m.updateThreadHighlight()
 				m.rebuildContent()
 				m.scrollToThreadCursor()
 			}
@@ -666,12 +666,12 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 			}
 			if m.dv.ThreadCursor > 1 {
 				m.dv.ThreadCursor--
-				m.formatFile(m.dv.CurrentFileIdx)
+				m.updateThreadHighlight()
 				m.rebuildContent()
 				m.scrollToThreadCursorBottom()
 			} else {
+				m.updateThreadHighlight() // remove highlight before exiting
 				m.dv.ThreadCursor = 0
-				m.formatFile(m.dv.CurrentFileIdx)
 				m.rebuildContent()
 				m.dv.ScrollToDiffCursor()
 			}
@@ -683,8 +683,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 			m.dv.VP.SetYOffset(m.dv.VP.YOffset() - m.dv.Height/2)
 			return m, nil, true
 		case "esc":
+			m.updateThreadHighlight() // remove highlight
 			m.dv.ThreadCursor = 0
-			m.formatFile(m.dv.CurrentFileIdx)
 			m.rebuildContent()
 			m.dv.ScrollToDiffCursor()
 			return m, nil, true
@@ -699,8 +699,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 			m.dv.ThreadCursor = 0
 			return m, nil, true
 		case "enter":
+			m.updateThreadHighlight() // remove highlight
 			m.dv.ThreadCursor = 0
-			m.formatFile(m.dv.CurrentFileIdx)
 			m.rebuildContent()
 			m.dv.ScrollToDiffCursor()
 			return m, nil, true
@@ -762,8 +762,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 		}
 		// If inside a thread, exit thread mode.
 		if m.dv.ThreadCursor > 0 {
+			m.updateThreadHighlight() // remove highlight
 			m.dv.ThreadCursor = 0
-			m.formatFile(m.dv.CurrentFileIdx)
 			m.rebuildContent()
 			m.dv.ScrollToDiffCursor()
 			return m, nil, true
@@ -771,7 +771,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 		// If on a line with comments, enter thread navigation.
 		if m.dv.CurrentFileIdx >= 0 && m.dv.HasDiffLines() && m.cursorHasThread() {
 			m.dv.ThreadCursor = 1
-			m.formatFile(m.dv.CurrentFileIdx)
+			m.updateThreadHighlight() // add highlight
 			m.rebuildContent()
 			m.scrollToThreadCursor()
 			return m, nil, true
@@ -1104,6 +1104,16 @@ func (m Model) highlightFileCmd(index int) tea.Cmd {
 
 func (m *Model) formatFile(index int) {
 	m.dv.FormatFile(index)
+}
+
+// updateThreadHighlight re-renders just the thread at the cursor with updated highlighting.
+// Much faster than formatFile for large files since it's O(thread) not O(file).
+func (m *Model) updateThreadHighlight() {
+	_, line, side, ok := m.cursorThreadInfo()
+	if !ok {
+		return
+	}
+	m.dv.SpliceThreadWithHighlight(m.dv.CurrentFileIdx, side, line, m.dv.ThreadCursor > 0, m.dv.ThreadCursor)
 }
 
 // commentStoreAdapter adapts a CommentStore to the CommentSource interface.

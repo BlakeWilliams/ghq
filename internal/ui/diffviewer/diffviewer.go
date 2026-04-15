@@ -686,6 +686,12 @@ func (d *DiffViewer) ReformatAllFiles() {
 // SpliceThreadForComment re-renders a single comment thread and splices it
 // into the cached render for the given file. O(thread) instead of O(n).
 func (d *DiffViewer) SpliceThreadForComment(fileIdx int, side string, line int) {
+	d.SpliceThreadWithHighlight(fileIdx, side, line, false, 0)
+}
+
+// SpliceThreadWithHighlight re-renders a single comment thread with optional
+// highlighting and splices it into the cached render. O(thread) instead of O(n).
+func (d *DiffViewer) SpliceThreadWithHighlight(fileIdx int, side string, line int, highlighted bool, hlIdx int) {
 	if fileIdx < 0 || fileIdx >= len(d.FileRenderCache) || d.FileRenderCache[fileIdx] == nil {
 		d.FormatFile(fileIdx)
 		return
@@ -718,7 +724,7 @@ func (d *DiffViewer) SpliceThreadForComment(fileIdx int, side string, line int) 
 	threadComments := components.CommentsForThread(fileComments, side, line)
 	gutterW := components.TotalGutterWidth(components.GutterColWidth(d.FileDiffs[fileIdx]))
 
-	newContent := components.RenderSingleThread(threadComments, d.ContentWidth(), lt, d.Ctx.DiffColors, false, 0, d.RenderBody, gutterW)
+	newContent := components.RenderSingleThread(threadComments, d.ContentWidth(), lt, d.Ctx.DiffColors, highlighted, hlIdx, d.RenderBody, gutterW)
 	components.SpliceThread(rc, threadIdx, newContent)
 
 	d.RenderedFiles[fileIdx] = rc.Content

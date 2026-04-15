@@ -545,12 +545,11 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 					}
 				}
 			}
-			// Update the affected file's rendered cache.
+			// Splice the affected thread (O(thread) not O(file)).
 			if fileIdx := m.fileIndexForPath(pendingPath); fileIdx >= 0 {
-				m.formatFile(fileIdx)
-				// Only rebuild viewport if we're looking at this file.
+				m.spliceThreadForComment(fileIdx, msg.CommentID)
 				if fileIdx == m.dv.CurrentFileIdx {
-					m.rebuildContent()
+					m.rebuildContentIfChanged()
 				}
 			}
 		} else if fileIdx := m.fileIndexForPath(m.dv.CopilotPendingPath(msg.CommentID)); fileIdx >= 0 && fileIdx == m.dv.CurrentFileIdx {
@@ -569,11 +568,11 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 	case copilot.ErrorMsg:
 		pendingPath := m.dv.CopilotPendingPath(msg.CommentID)
 		m.dv.ClearCopilotPending(msg.CommentID)
-		// Only re-render the affected file.
+		// Splice the affected thread (O(thread) not O(file)).
 		if fileIdx := m.fileIndexForPath(pendingPath); fileIdx >= 0 {
-			m.formatFile(fileIdx)
+			m.spliceThreadForComment(fileIdx, msg.CommentID)
 		}
-		m.rebuildContent()
+		m.rebuildContentIfChanged()
 		cmds := []tea.Cmd{}
 		if m.dv.Copilot != nil {
 			cmds = append(cmds, m.dv.Copilot.ListenCmd())
@@ -1331,7 +1330,10 @@ func (m *Model) goToSourceLine(lineNo int) {
 	best := m.findDiffLineBySourceLine(idx, lineNo, "RIGHT")
 	m.dv.DiffCursor = best
 	m.dv.SelectionAnchor = -1
-	m.formatFile(idx)
+	// Only format if not already rendered.
+	if idx < len(m.dv.RenderedFiles) && m.dv.RenderedFiles[idx] == "" {
+		m.formatFile(idx)
+	}
 	m.rebuildContent()
 	m.dv.ScrollToDiffCursor()
 }

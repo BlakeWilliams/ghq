@@ -79,8 +79,8 @@ type DiffViewer struct {
 	// Render body callback for markdown in comment threads.
 	RenderBody func(body string, width int, bg string) string
 
-	// Render cache per file (for splice-based updates).
-	FileRenderCache []*components.DiffRenderResult
+	// Render lists per file (structural render items).
+	FileRenderLists []*components.FileRenderList
 
 	// Loading spinner (shown while highlighting is in progress for current file).
 	Spinner       spinner.Model
@@ -598,6 +598,18 @@ func (d DiffViewer) RenderLayout(rightView string, rightTitle string) string {
 
 // --- File formatting ---
 
+// renderContext builds a RenderContext for the current viewer state using
+// the given diff lines (needed for gutter column width).
+func (d *DiffViewer) renderContext(diffLines []components.DiffLine) components.RenderContext {
+	colW := components.GutterColWidth(diffLines)
+	return components.RenderContext{
+		Width:      d.ContentWidth(),
+		Colors:     d.Ctx.DiffColors,
+		ColW:       colW,
+		RenderBody: d.RenderBody,
+	}
+}
+
 // CommentsForFile gathers comments for a file: base comments from the
 // CommentSource + copilot pending comments.
 func (d DiffViewer) CommentsForFile(filename string) []github.ReviewComment {
@@ -608,14 +620,29 @@ func (d DiffViewer) CommentsForFile(filename string) []github.ReviewComment {
 	return d.AppendCopilotPending(filename, comments)
 }
 
-// FormatFile renders a file and caches the result (content + offsets + splice data).
+// syncFromRenderList derives RenderedFiles, FileDiffOffsets, and FileCommentPositions
+// from the render list for the given file index.
+func (d *DiffViewer) syncFromRenderList(index int, rc components.RenderContext) {
+	list := d.FileRenderLists[index]
+	if index < len(d.RenderedFiles) {
+		d.RenderedFiles[index] = list.String(rc)
+	}
+	if index < len(d.FileDiffOffsets) {
+		numDiffLines := len(d.FileDiffs[index])
+		d.FileDiffOffsets[index] = list.DiffLineOffsets(numDiffLines, rc)
+	}
+	if index < len(d.FileCommentPositions) {
+		d.FileCommentPositions[index] = list.CommentPositions(rc)
+	}
+}
+
+// FormatFile renders a file and caches the result via the render list.
 // Uses the CommentSource to gather comments automatically.
 func (d *DiffViewer) FormatFile(index int) {
 	if index < 0 || index >= len(d.HighlightedFiles) || d.HighlightedFiles[index].File.Filename == "" {
 		return
 	}
 	hl := d.HighlightedFiles[index]
-	width := d.ContentWidth()
 	fileComments := d.CommentsForFile(d.Files[index].Filename)
 
 	var opts components.DiffFormatOptions
@@ -623,18 +650,17 @@ func (d *DiffViewer) FormatFile(index int) {
 		opts.RenderBody = d.RenderBody
 	}
 
-	result := components.FormatDiffFile(hl, width, d.Ctx.DiffColors, fileComments, opts)
-	if index < len(d.RenderedFiles) {
-		d.RenderedFiles[index] = result.Content
-	}
-	if index < len(d.FileDiffOffsets) {
-		d.FileDiffOffsets[index] = result.DiffLineOffsets
-	}
-	if index < len(d.FileCommentPositions) {
-		d.FileCommentPositions[index] = result.CommentPositions
-	}
-	if index < len(d.FileRenderCache) {
-		d.FileRenderCache[index] = &result
+	// Prepare highlighted diff lines.
+	diffLines := make([]components.DiffLine, len(hl.DiffLines))
+	copy(diffLines, hl.DiffLines)
+	colW := components.GutterColWidth(diffLines)
+	components.FormatDiffLinesFromHL(diffLines, hl.HlLines, hl.HlLinesOld, hl.Filename, d.ContentWidth(), d.Ctx.DiffColors, colW)
+
+	// Build the render list and derive all cached fields from it.
+	if index < len(d.FileRenderLists) {
+		d.FileRenderLists[index] = components.BuildRenderList(diffLines, fileComments, opts)
+		rc := d.renderContext(diffLines)
+		d.syncFromRenderList(index, rc)
 	}
 }
 
@@ -648,25 +674,21 @@ func (d *DiffViewer) FormatFileWithComments(index int, fileComments []github.Rev
 	if hl.File.Filename == "" {
 		return
 	}
-	width := d.ContentWidth()
 
 	var opts components.DiffFormatOptions
 	if d.RenderBody != nil {
 		opts.RenderBody = d.RenderBody
 	}
 
-	result := components.FormatDiffFile(hl, width, d.Ctx.DiffColors, fileComments, opts)
-	if index < len(d.RenderedFiles) {
-		d.RenderedFiles[index] = result.Content
-	}
-	if index < len(d.FileDiffOffsets) {
-		d.FileDiffOffsets[index] = result.DiffLineOffsets
-	}
-	if index < len(d.FileCommentPositions) {
-		d.FileCommentPositions[index] = result.CommentPositions
-	}
-	if index < len(d.FileRenderCache) {
-		d.FileRenderCache[index] = &result
+	diffLines := make([]components.DiffLine, len(hl.DiffLines))
+	copy(diffLines, hl.DiffLines)
+	colW := components.GutterColWidth(diffLines)
+	components.FormatDiffLinesFromHL(diffLines, hl.HlLines, hl.HlLinesOld, hl.Filename, d.ContentWidth(), d.Ctx.DiffColors, colW)
+
+	if index < len(d.FileRenderLists) {
+		d.FileRenderLists[index] = components.BuildRenderList(diffLines, fileComments, opts)
+		rc := d.renderContext(diffLines)
+		d.syncFromRenderList(index, rc)
 	}
 }
 
@@ -675,123 +697,84 @@ func (d *DiffViewer) ReformatAllFiles() {
 	for i := range d.RenderedFiles {
 		d.RenderedFiles[i] = ""
 	}
-	for i := range d.FileRenderCache {
-		d.FileRenderCache[i] = nil
+	for i := range d.FileRenderLists {
+		d.FileRenderLists[i] = nil
 	}
 	if d.CurrentFileIdx >= 0 {
 		d.FormatFile(d.CurrentFileIdx)
 	}
 }
 
-// SpliceThreadForComment re-renders a single comment thread and splices it
-// into the cached render for the given file. O(thread) instead of O(n).
+// SpliceThreadForComment re-renders a single comment thread in the render list.
 func (d *DiffViewer) SpliceThreadForComment(fileIdx int, side string, line int) {
 	d.SpliceThreadWithHighlight(fileIdx, side, line, false, 0)
 }
 
-// SpliceThreadWithHighlight re-renders a single comment thread with optional
-// highlighting and splices it into the cached render. O(thread) instead of O(n).
+// SpliceThreadWithHighlight replaces a comment thread in the render list with
+// updated content (e.g. highlight state change, new reply).
 func (d *DiffViewer) SpliceThreadWithHighlight(fileIdx int, side string, line int, highlighted bool, hlIdx int) {
-	if fileIdx < 0 || fileIdx >= len(d.FileRenderCache) || d.FileRenderCache[fileIdx] == nil {
+	if fileIdx < 0 || fileIdx >= len(d.FileRenderLists) || d.FileRenderLists[fileIdx] == nil {
 		d.FormatFile(fileIdx)
 		return
 	}
-	rc := d.FileRenderCache[fileIdx]
-	if len(rc.ThreadRanges) == 0 {
-		d.FormatFile(fileIdx)
-		return
-	}
-
-	threadIdx := -1
-	for i, tr := range rc.ThreadRanges {
-		if tr.Side == side && tr.Line == line {
-			threadIdx = i
-			break
-		}
-	}
-	if threadIdx < 0 {
+	list := d.FileRenderLists[fileIdx]
+	ti := list.FindThread(side, line)
+	if ti < 0 {
 		d.FormatFile(fileIdx)
 		return
 	}
 
-	diffLineIdx := rc.ThreadRanges[threadIdx].DiffLineIdx
-	lt := components.LineAdd
-	if diffLineIdx < len(d.FileDiffs[fileIdx]) {
-		lt = d.FileDiffs[fileIdx][diffLineIdx].Type
+	old, ok := list.Items[ti].(*components.CommentThreadItem)
+	if !ok {
+		d.FormatFile(fileIdx)
+		return
 	}
 
 	fileComments := d.CommentsForFile(d.Files[fileIdx].Filename)
 	threadComments := components.CommentsForThread(fileComments, side, line)
-	gutterW := components.TotalGutterWidth(components.GutterColWidth(d.FileDiffs[fileIdx]))
 
-	newContent := components.RenderSingleThread(threadComments, d.ContentWidth(), lt, d.Ctx.DiffColors, highlighted, hlIdx, d.RenderBody, gutterW)
-	components.SpliceThread(rc, threadIdx, newContent)
+	replacement := components.NewCommentThreadItem(old.DiffIdx(), side, line, threadComments, old.ParentLineType)
+	replacement.Highlighted = highlighted
+	replacement.HlIdx = hlIdx
+	list.ReplaceThread(side, line, replacement)
 
-	d.RenderedFiles[fileIdx] = rc.Content
-	if fileIdx < len(d.FileDiffOffsets) {
-		d.FileDiffOffsets[fileIdx] = rc.DiffLineOffsets
-	}
-	if fileIdx < len(d.FileCommentPositions) {
-		d.FileCommentPositions[fileIdx] = rc.CommentPositions
-	}
+	rc := d.renderContext(d.FileDiffs[fileIdx])
+	d.syncFromRenderList(fileIdx, rc)
 }
 
-// RemoveThread removes a comment thread from the cached render.
-// Used when resolving a thread. Returns true if the thread was found and removed.
+// RemoveThread removes a comment thread from the render list.
+// Returns true if the thread was found and removed.
 func (d *DiffViewer) RemoveThread(fileIdx int, side string, line int) bool {
-	if fileIdx < 0 || fileIdx >= len(d.FileRenderCache) || d.FileRenderCache[fileIdx] == nil {
+	if fileIdx < 0 || fileIdx >= len(d.FileRenderLists) || d.FileRenderLists[fileIdx] == nil {
 		return false
 	}
-	rc := d.FileRenderCache[fileIdx]
-	if len(rc.ThreadRanges) == 0 {
-		return false
-	}
-
-	threadIdx := -1
-	for i, tr := range rc.ThreadRanges {
-		if tr.Side == side && tr.Line == line {
-			threadIdx = i
-			break
-		}
-	}
-	if threadIdx < 0 {
+	list := d.FileRenderLists[fileIdx]
+	if !list.RemoveThread(side, line) {
 		return false
 	}
 
-	components.RemoveThread(rc, threadIdx)
-
-	d.RenderedFiles[fileIdx] = rc.Content
-	if fileIdx < len(d.FileDiffOffsets) {
-		d.FileDiffOffsets[fileIdx] = rc.DiffLineOffsets
-	}
+	rc := d.renderContext(d.FileDiffs[fileIdx])
+	d.syncFromRenderList(fileIdx, rc)
 	return true
 }
 
-// InsertThread inserts a new comment thread into the cached render.
+// InsertThread inserts a new comment thread into the render list.
 // Returns true if the thread was successfully inserted.
 func (d *DiffViewer) InsertThread(fileIdx int, diffLineIdx int, side string, line int, comments []github.ReviewComment) bool {
-	if fileIdx < 0 || fileIdx >= len(d.FileRenderCache) || d.FileRenderCache[fileIdx] == nil {
+	if fileIdx < 0 || fileIdx >= len(d.FileRenderLists) || d.FileRenderLists[fileIdx] == nil {
 		return false
 	}
-	rc := d.FileRenderCache[fileIdx]
 
 	lt := components.LineAdd
 	if diffLineIdx < len(d.FileDiffs[fileIdx]) {
 		lt = d.FileDiffs[fileIdx][diffLineIdx].Type
 	}
 
-	gutterW := components.TotalGutterWidth(components.GutterColWidth(d.FileDiffs[fileIdx]))
-	content := components.RenderSingleThread(comments, d.ContentWidth(), lt, d.Ctx.DiffColors, false, 0, d.RenderBody, gutterW)
+	item := components.NewCommentThreadItem(diffLineIdx, side, line, comments, lt)
+	d.FileRenderLists[fileIdx].InsertAfterDiffLine(diffLineIdx, item)
 
-	idx := components.InsertThread(rc, diffLineIdx, side, line, content)
-	if idx < 0 {
-		return false
-	}
-
-	d.RenderedFiles[fileIdx] = rc.Content
-	if fileIdx < len(d.FileDiffOffsets) {
-		d.FileDiffOffsets[fileIdx] = rc.DiffLineOffsets
-	}
+	rc := d.renderContext(d.FileDiffs[fileIdx])
+	d.syncFromRenderList(fileIdx, rc)
 	return true
 }
 
@@ -893,7 +876,7 @@ func (d *DiffViewer) InitFileSlices(n int) {
 	d.FileDiffs = make([][]components.DiffLine, n)
 	d.FileDiffOffsets = make([][]int, n)
 	d.FileCommentPositions = make([][]components.CommentPosition, n)
-	d.FileRenderCache = make([]*components.DiffRenderResult, n)
+	d.FileRenderLists = make([]*components.FileRenderList, n)
 }
 
 // --- Copilot helpers ---

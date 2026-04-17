@@ -296,7 +296,7 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 		m.dv.Tree.Height = msg.Height - 2
 		// Width changed — layouts need recomputing.
 		if m.dv.FilesListLoaded {
-			m.reformatAllFiles()
+			m.dv.ReformatAllFiles()
 		}
 		m.rebuildContent()
 		return m, nil
@@ -350,7 +350,7 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 		m.dv.FileDiffs = make([][]components.DiffLine, len(msg.files))
 		m.dv.FileDiffOffsets = make([][]int, len(msg.files))
 		m.dv.FileCommentPositions = make([][]components.CommentPosition, len(msg.files))
-		m.dv.FileRenderCache = make([]*components.DiffRenderResult, len(msg.files))
+		m.dv.FileRenderLists = make([]*components.FileRenderList, len(msg.files))
 		m.fileLayouts = make([]components.DiffLayout, len(msg.files))
 		m.rebuildFilePathIndex()
 		m.dv.FilesListLoaded = true
@@ -1277,10 +1277,6 @@ func replaceMarkdownPair(s, delim, open, close string) string {
 		s = s[:start] + open + inner + close + s[end+len(delim):]
 	}
 	return s
-}
-
-func (m *Model) reformatAllFiles() {
-	m.dv.ReformatAllFiles()
 }
 
 // needsRenderBufferUpdate returns true if the viewport scrolled outside

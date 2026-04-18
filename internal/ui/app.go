@@ -435,37 +435,37 @@ func (m Model) renderStatusBar() string {
 // background color slightly: lighter in dark mode, darker in light mode.
 func (m Model) barBackground() color.Color {
 	if m.termBg == nil {
+		// Fall back to ANSI colors derived from colorscheme.
 		if m.hasDarkBg {
-			return lipgloss.Color("#1c1c1c")
+			return lipgloss.Black
 		}
-		return lipgloss.Color("#e4e4e4")
+		return lipgloss.White
 	}
 	r, g, b, _ := m.termBg.RGBA()
-	if m.hasDarkBg {
-		return lipgloss.Color(fmt.Sprintf("#%02x%02x%02x",
-			clampByte(int(r>>8)+13),
-			clampByte(int(g>>8)+13),
-			clampByte(int(b>>8)+13)))
+	shift := 13
+	if !m.hasDarkBg {
+		shift = -13
 	}
 	return lipgloss.Color(fmt.Sprintf("#%02x%02x%02x",
-		clampByte(int(r>>8)-13),
-		clampByte(int(g>>8)-13),
-		clampByte(int(b>>8)-13)))
+		clampByte(int(r>>8)+shift),
+		clampByte(int(g>>8)+shift),
+		clampByte(int(b>>8)+shift)))
 }
 
 // barForeground computes the status bar text color by shifting the terminal
 // background toward the opposite end — enough contrast to read but not harsh.
 func (m Model) barForeground() color.Color {
 	if m.termBg == nil {
+		// Fall back to ANSI colors derived from colorscheme.
 		if m.hasDarkBg {
-			return lipgloss.Color("#808080")
+			return lipgloss.BrightBlack
 		}
-		return lipgloss.Color("#585858")
+		return lipgloss.BrightBlack
 	}
 	r, g, b, _ := m.termBg.RGBA()
-	shift := 100
+	shift := 130
 	if !m.hasDarkBg {
-		shift = -100
+		shift = -130
 	}
 	return lipgloss.Color(fmt.Sprintf("#%02x%02x%02x",
 		clampByte(int(r>>8)+shift),

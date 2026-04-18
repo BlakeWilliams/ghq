@@ -22,6 +22,15 @@ import (
 
 const scrollMargin = 5
 
+// LayoutInfo carries optional metadata for the header/footer chrome.
+// Callers that don't set fields get sensible defaults (no mode, no branch, etc).
+type LayoutInfo struct {
+	ModeName    string      // e.g. "Unstaged", "Staged", "Branch"
+	ModeColor   color.Color // derived from mode; nil = no mode shown
+	BranchName  string      // shown in footer under file tree
+	PR          *github.PullRequest
+}
+
 // CopilotPendingInfo tracks a single pending Copilot reply.
 type CopilotPendingInfo struct {
 	Path string
@@ -111,11 +120,11 @@ func (d DiffViewer) RightPanelInnerWidth() int {
 }
 
 func (d DiffViewer) ContentWidth() int {
-	return d.RightPanelInnerWidth()
+	return d.RightPanelInnerWidth() - 1 // -1 for scrollbar column
 }
 
 func (d DiffViewer) ViewportHeight() int {
-	return d.Height - 2
+	return d.Height - 2 // header + separator (footer only affects file tree side)
 }
 
 func (d DiffViewer) BorderStyle() lipgloss.Style {
@@ -495,16 +504,16 @@ func replaceBackground(inner string, colors styles.DiffColors, selBg string) str
 // --- Layout rendering ---
 
 // RenderLayout composes the file tree (left) and diff view (right) into the final output.
-func (d DiffViewer) RenderLayout(rightView string, rightTitle string) string {
+func (d DiffViewer) RenderLayout(rightView string, rightTitle string, info LayoutInfo) string {
 	treeW := d.Tree.Width
-	chromeRows := 2 // header + separator
+	chromeRows := 2 // header + separator (footer only affects left panel)
 
 	// Chrome color: use bar background from terminal, fall back to BrightBlack.
-	var chromeColor color.Color = lipgloss.BrightBlack
+	var chromeClr color.Color = lipgloss.BrightBlack
 	if d.Ctx.ChromeColor != nil {
-		chromeColor = d.Ctx.ChromeColor
+		chromeClr = d.Ctx.ChromeColor
 	}
-	chrome := lipgloss.NewStyle().Foreground(chromeColor)
+	chrome := lipgloss.NewStyle().Foreground(chromeClr)
 	dim := lipgloss.NewStyle().Foreground(lipgloss.BrightBlack)
 	bold := lipgloss.NewStyle().Bold(true)
 
@@ -521,7 +530,8 @@ func (d DiffViewer) RenderLayout(rightView string, rightTitle string) string {
 	sep := chrome.Render("│")
 	rightW := d.RightPanelWidth()
 
-	// File count header with proper pluralization.
+	// === Header: left panel ===
+	// " N Files ... MODE_TEXT "
 	var treeLabel string
 	n := len(d.Files)
 	if n == 0 {
@@ -532,9 +542,24 @@ func (d DiffViewer) RenderLayout(rightView string, rightTitle string) string {
 		treeLabel = treeTitleStyle.Render(fmt.Sprintf("%d Files", n))
 	}
 
-	// Right title: breadcrumb style (dim dir / bold filename).
+	var modeLabel string
+	if info.ModeName != "" && info.ModeColor != nil {
+		modeStyle := lipgloss.NewStyle().Foreground(info.ModeColor)
+		modeLabel = modeStyle.Render(strings.ToUpper(info.ModeName))
+	}
+
+	treeLabelW := lipgloss.Width(treeLabel)
+	modeLabelW := lipgloss.Width(modeLabel)
+	treeHeaderPad := treeW - 1 - treeLabelW - modeLabelW - 1 // -1 leading space, -1 for sep
+	if treeHeaderPad < 0 {
+		treeHeaderPad = 0
+	}
+	treeHeader := " " + treeLabel + strings.Repeat(" ", treeHeaderPad) + modeLabel
+
+	// === Header: right panel ===
+	// " dir/filename ... +N -M  PR #42  ◀ 42% "
 	var rightLabel string
-	var statsLabel string
+	var rightTrailer string // right-aligned: stats + PR + scroll
 	if rightTitle == "Overview" {
 		rightLabel = rightTitleStyle.Render("Overview")
 	} else {
@@ -544,39 +569,46 @@ func (d DiffViewer) RenderLayout(rightView string, rightTitle string) string {
 		} else {
 			rightLabel = rightTitleStyle.Render(rightTitle)
 		}
-		// File stats: +N -M right-aligned.
-		if d.CurrentFileIdx >= 0 && d.CurrentFileIdx < len(d.Files) {
-			f := d.Files[d.CurrentFileIdx]
-			green := lipgloss.NewStyle().Foreground(lipgloss.Green)
-			red := lipgloss.NewStyle().Foreground(lipgloss.Red)
-			var parts []string
-			if f.Additions > 0 {
-				parts = append(parts, green.Render(fmt.Sprintf("+%d", f.Additions)))
-			}
-			if f.Deletions > 0 {
-				parts = append(parts, red.Render(fmt.Sprintf("-%d", f.Deletions)))
-			}
-			if len(parts) > 0 {
-				statsLabel = strings.Join(parts, " ")
-			}
+	}
+
+	// Build right-aligned trailer parts.
+	var trailerParts []string
+
+	// File stats (+N -M).
+	if d.CurrentFileIdx >= 0 && d.CurrentFileIdx < len(d.Files) {
+		f := d.Files[d.CurrentFileIdx]
+		green := lipgloss.NewStyle().Foreground(lipgloss.Green)
+		red := lipgloss.NewStyle().Foreground(lipgloss.Red)
+		var statParts []string
+		if f.Additions > 0 {
+			statParts = append(statParts, green.Render(fmt.Sprintf("+%d", f.Additions)))
+		}
+		if f.Deletions > 0 {
+			statParts = append(statParts, red.Render(fmt.Sprintf("-%d", f.Deletions)))
+		}
+		if len(statParts) > 0 {
+			trailerParts = append(trailerParts, strings.Join(statParts, " "))
 		}
 	}
 
-	// Header row.
-	treeHeaderW := lipgloss.Width(treeLabel)
-	treeHeaderPad := treeW - 1 - treeHeaderW - 1
-	if treeHeaderPad < 0 {
-		treeHeaderPad = 0
+	// PR badge.
+	if info.PR != nil {
+		prStyle := lipgloss.NewStyle().Foreground(lipgloss.Cyan)
+		trailerParts = append(trailerParts, prStyle.Render(fmt.Sprintf("PR #%d", info.PR.Number)))
 	}
+
+	if len(trailerParts) > 0 {
+		rightTrailer = strings.Join(trailerParts, dim.Render("  "))
+	}
+
 	rightLabelW := lipgloss.Width(rightLabel)
-	statsLabelW := lipgloss.Width(statsLabel)
-	// " rightLabel ...gap... statsLabel " within rightW columns (minus sep)
-	rightHeaderGap := rightW - 2 - rightLabelW - statsLabelW // -2 for leading/trailing space
+	rightTrailerW := lipgloss.Width(rightTrailer)
+	rightHeaderGap := rightW - 2 - rightLabelW - rightTrailerW // -2 for leading/trailing space
 	if rightHeaderGap < 0 {
 		rightHeaderGap = 0
 	}
-	rightHeader := " " + rightLabel + strings.Repeat(" ", rightHeaderGap) + statsLabel + " "
-	headerLine := " " + treeLabel + strings.Repeat(" ", treeHeaderPad) + sep + rightHeader
+	rightHeader := " " + rightLabel + strings.Repeat(" ", rightHeaderGap) + rightTrailer + " "
+	headerLine := treeHeader + sep + rightHeader
 
 	// Separator row: thin horizontal rule.
 	treeFill := treeW - 1
@@ -593,12 +625,37 @@ func (d DiffViewer) RenderLayout(rightView string, rightTitle string) string {
 	contentH := d.Height - chromeRows
 	tree := d.Tree
 	tree.Width = treeW - 1
-	tree.Height = contentH
+	tree.Height = contentH - 2 // tree loses 2 rows for footer separator + branch
 	tree.CurrentFileIdx = d.CurrentFileIdx
 	treeContentLines := tree.View()
 	rightLines := strings.Split(rightView, "\n")
 
 	innerRightW := rightW - 1
+
+	// Scrollbar: compute thumb position and size.
+	totalLines := d.VP.TotalLineCount()
+	vpH := contentH
+	var thumbStart, thumbLen int
+	if totalLines <= vpH || totalLines == 0 {
+		// Content fits — no scrollbar needed.
+		thumbStart = -1
+		thumbLen = 0
+	} else {
+		thumbLen = vpH * vpH / totalLines
+		if thumbLen < 1 {
+			thumbLen = 1
+		}
+		scrollable := totalLines - vpH
+		offset := d.VP.YOffset()
+		if offset > scrollable {
+			offset = scrollable
+		}
+		thumbStart = offset * (vpH - thumbLen) / scrollable
+	}
+	// Scrollbar styles: track matches border color, thumb slightly lighter.
+	trackChar := chrome.Render("│")
+	thumbColor := uictx.BrightnessModify(chromeClr, 40)
+	thumbChar := lipgloss.NewStyle().Foreground(thumbColor).Render("┃")
 
 	var b strings.Builder
 	b.WriteString(headerLine)
@@ -607,14 +664,35 @@ func (d DiffViewer) RenderLayout(rightView string, rightTitle string) string {
 	b.WriteString("\n")
 
 	for i := 0; i < contentH; i++ {
-		tl := ""
-		if i < len(treeContentLines) {
-			tl = treeContentLines[i]
-		}
-		tlW := lipgloss.Width(tl)
-		treePad := treeW - 1 - tlW
-		if treePad < 0 {
-			treePad = 0
+		// Left panel: tree content for most rows, footer for last 2.
+		var leftPart string
+		if i == contentH-2 {
+			// Footer separator (only on tree side).
+			leftPart = chrome.Render(strings.Repeat("─", treeW-1))
+		} else if i == contentH-1 {
+			// Branch name row.
+			if info.BranchName != "" {
+				branchText := dim.Render(" " + info.BranchName)
+				branchW := lipgloss.Width(branchText)
+				pad := treeW - 1 - branchW
+				if pad < 0 {
+					pad = 0
+				}
+				leftPart = branchText + strings.Repeat(" ", pad)
+			} else {
+				leftPart = strings.Repeat(" ", treeW-1)
+			}
+		} else {
+			tl := ""
+			if i < len(treeContentLines) {
+				tl = treeContentLines[i]
+			}
+			tlW := lipgloss.Width(tl)
+			treePad := treeW - 1 - tlW
+			if treePad < 0 {
+				treePad = 0
+			}
+			leftPart = tl + strings.Repeat(" ", treePad)
 		}
 
 		rl := ""
@@ -622,15 +700,27 @@ func (d DiffViewer) RenderLayout(rightView string, rightTitle string) string {
 			rl = rightLines[i]
 		}
 		rlW := lipgloss.Width(rl)
-		if rlW < innerRightW {
-			rl += strings.Repeat(" ", innerRightW-rlW)
+		contentW := innerRightW - 1 // -1 for scrollbar column
+		if rlW < contentW {
+			rl += strings.Repeat(" ", contentW-rlW)
 		}
 
-		b.WriteString(tl + strings.Repeat(" ", treePad) + sep + rl)
+		// Scrollbar column.
+		var scrollCol string
+		if thumbStart < 0 {
+			scrollCol = " " // no scrollbar needed
+		} else if i >= thumbStart && i < thumbStart+thumbLen {
+			scrollCol = thumbChar
+		} else {
+			scrollCol = trackChar
+		}
+
+		b.WriteString(leftPart + sep + rl + scrollCol)
 		if i < contentH-1 {
 			b.WriteString("\n")
 		}
 	}
+
 	return b.String()
 }
 

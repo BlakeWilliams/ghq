@@ -1,5 +1,7 @@
 package prdetail
 
+import "github.com/blakewilliams/ghq/internal/ui/diffviewer"
+
 func (m Model) View() string {
 	if !m.dv.VPReady {
 		return ""
@@ -20,7 +22,7 @@ func (m Model) View() string {
 	}
 
 	// Compose: tree | divider | right panel.
-	view := m.dv.RenderLayout(rightView, rightTitle)
+	view := m.dv.RenderLayout(rightView, rightTitle, diffviewer.LayoutInfo{})
 
 	// Modal overlay on top.
 	if m.showSidebar {

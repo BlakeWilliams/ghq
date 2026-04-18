@@ -164,42 +164,6 @@ func (m Model) BranchName() string              { return m.branch }
 func (m Model) DiffMode() git.DiffMode          { return m.mode }
 func (m Model) PR() *github.PullRequest         { return m.pr }
 func (m Model) Files() []github.PullRequestFile { return m.dv.Files }
-func (m Model) TreeWidth() int                  { return m.dv.Tree.Width }
-
-// CurrentFile returns the filename being viewed, or "" for overview.
-func (m Model) CurrentFile() string {
-	if m.dv.CurrentFileIdx >= 0 && m.dv.CurrentFileIdx < len(m.dv.Files) {
-		return m.dv.Files[m.dv.CurrentFileIdx].Filename
-	}
-	return ""
-}
-
-// CurrentFileStats returns additions and deletions for the current file.
-func (m Model) CurrentFileStats() (additions, deletions int) {
-	if m.dv.CurrentFileIdx >= 0 && m.dv.CurrentFileIdx < len(m.dv.Files) {
-		f := m.dv.Files[m.dv.CurrentFileIdx]
-		return f.Additions, f.Deletions
-	}
-	return 0, 0
-}
-
-// ScrollPercent returns the viewport scroll position as a string.
-// Returns "Top", "Bot", "All", or "N%".
-func (m Model) ScrollPercent() string {
-	if m.dv.VP.TotalLineCount() == 0 {
-		return "All"
-	}
-	if m.dv.VP.AtTop() && m.dv.VP.AtBottom() {
-		return "All"
-	}
-	if m.dv.VP.AtTop() {
-		return "Top"
-	}
-	if m.dv.VP.AtBottom() {
-		return "Bot"
-	}
-	return fmt.Sprintf("%d%%", int(m.dv.VP.ScrollPercent()*100))
-}
 
 // restoreSavedPosition finds the saved file by name and restores cursor
 // to the diff line matching the saved source line number.
@@ -985,7 +949,13 @@ func (m Model) renderLayout(rightView string) string {
 	} else {
 		rightTitle = "Overview"
 	}
-	return m.dv.RenderLayout(rightView, rightTitle)
+	info := diffviewer.LayoutInfo{
+		ModeName:   m.mode.String(),
+		ModeColor:  styles.ModeColor(m.mode),
+		BranchName: m.branch,
+		PR:         m.pr,
+	}
+	return m.dv.RenderLayout(rightView, rightTitle, info)
 }
 
 // --- Content building ---

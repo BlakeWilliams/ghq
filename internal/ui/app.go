@@ -65,7 +65,7 @@ const (
 	modeCopilotChat
 )
 
-const chromeHeight = 1 // status bar only
+const chromeHeight = 0 // no status bar — info is in the layout header/footer
 
 
 type Model struct {
@@ -351,7 +351,14 @@ func (m Model) handleCommand(msg commandbar.CommandMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) View() tea.View {
-	contentHeight := m.height - chromeHeight
+	// Reserve a row for command bar / quit hint when active.
+	barActive := m.quitPending || m.mode == modeCommand
+	barHeight := 0
+	if barActive {
+		barHeight = 1
+	}
+
+	contentHeight := m.height - barHeight
 	if contentHeight < 0 {
 		contentHeight = 0
 	}
@@ -365,16 +372,20 @@ func (m Model) View() tea.View {
 		content = m.renderChatOverlay(content, contentHeight)
 	}
 
-	var bar string
-	if m.quitPending {
-		bar = styles.StatusBarKey.Render("Press ctrl+c again to quit")
-	} else if m.mode == modeCommand {
-		bar = m.commandBar.View()
+	var output string
+	if barActive {
+		var bar string
+		if m.quitPending {
+			bar = styles.StatusBarKey.Render("Press ctrl+c again to quit")
+		} else {
+			bar = m.commandBar.View()
+		}
+		output = content + "\n" + bar
 	} else {
-		bar = m.renderStatusBar()
+		output = content
 	}
 
-	v := tea.NewView(content + "\n" + bar)
+	v := tea.NewView(output)
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 	return v

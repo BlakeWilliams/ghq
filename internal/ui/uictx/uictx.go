@@ -1,9 +1,11 @@
 package uictx
 
 import (
+	"fmt"
 	"image/color"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/blakewilliams/ghq/internal/github"
 	"github.com/blakewilliams/ghq/internal/ui/styles"
 )
@@ -63,6 +65,30 @@ func CachedCmd[T any](data T, found bool, refetch func() (T, error), wrap func(T
 	}
 
 	return tea.Batch(cmds...)
+}
+
+// BrightnessModify applies lualine's brightness_modifier formula to an
+// existing color. Positive pct lightens, negative darkens. Returns a new
+// lipgloss.Color hex string.
+func BrightnessModify(c color.Color, pct float64) color.Color {
+	if c == nil {
+		return lipgloss.BrightBlack
+	}
+	r, g, b, _ := c.RGBA()
+	rr := clampByte(int(float64(r>>8) + float64(r>>8)*pct/100))
+	gg := clampByte(int(float64(g>>8) + float64(g>>8)*pct/100))
+	bb := clampByte(int(float64(b>>8) + float64(b>>8)*pct/100))
+	return lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", rr, gg, bb))
+}
+
+func clampByte(v int) int {
+	if v < 0 {
+		return 0
+	}
+	if v > 255 {
+		return 255
+	}
+	return v
 }
 
 type Context struct {

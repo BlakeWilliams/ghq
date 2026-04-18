@@ -394,10 +394,7 @@ func (m Model) renderStatusBar() string {
 	mode := ld.DiffMode()
 	modeBg := styles.AirlineModeColor(mode)
 
-	// Segment styles — use ANSI colors to derive from terminal colorscheme.
-	branchBg := lipgloss.Cyan
 	modeStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Black).Background(modeBg)
-	branchStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Black).Background(branchBg)
 	// Mid-section adapts to terminal background brightness.
 	var midBg color.Color
 	var midFg color.Color
@@ -409,15 +406,14 @@ func (m Model) renderStatusBar() string {
 		midFg = lipgloss.BrightBlack
 	}
 	midStyle := lipgloss.NewStyle().Foreground(midFg).Background(midBg)
+	branchStyle := lipgloss.NewStyle().Foreground(lipgloss.BrightWhite).Background(midBg)
 
-	// Left: MODE → branch → mid
-	modeToBranch := lipgloss.NewStyle().Foreground(modeBg).Background(branchBg).Render(plRight)
-	branchToMid := lipgloss.NewStyle().Foreground(branchBg).Background(midBg).Render(plRight)
-
+	// Left: MODE ▶ • branch
+	modeToMid := lipgloss.NewStyle().Foreground(modeBg).Background(midBg).Render(plRight)
 	modeText := modeStyle.Render(" " + strings.ToUpper(mode.String()) + " ")
-	branchText := branchStyle.Render(" " + branch + " ")
+	branchText := branchStyle.Render(" \u2022 " + branch + " ")
 
-	left := modeText + modeToBranch + branchText + branchToMid
+	left := modeText + modeToMid + branchText
 
 	// Right side: PR badge
 	var right string

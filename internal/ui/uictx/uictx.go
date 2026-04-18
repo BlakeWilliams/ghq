@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/blakewilliams/ghq/internal/config"
 	"github.com/blakewilliams/ghq/internal/github"
 	"github.com/blakewilliams/ghq/internal/ui/styles"
 )
@@ -104,6 +105,7 @@ type Context struct {
 	Username   string
 	Owner      string // repo owner (from flag or detected)
 	Repo       string // repo name
+	Config     config.Config
 }
 
 // KeyBinding describes a key and what it does, for help display.

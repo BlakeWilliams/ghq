@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blakewilliams/ghq/internal/config"
 	"github.com/blakewilliams/ghq/internal/git"
 	"github.com/blakewilliams/ghq/internal/github"
 	"github.com/blakewilliams/ghq/internal/terminal"
@@ -103,11 +104,17 @@ type AppConfig struct {
 	Owner    string
 	Repo     string
 	RepoRoot string // local git repo root
+	Config   config.Config
 }
 
 // NewApp creates and returns a new top-level UI model.
 func NewApp(cfg AppConfig) Model {
-	ctx := &uictx.Context{Client: cfg.Client, Owner: cfg.Owner, Repo: cfg.Repo}
+	ctx := &uictx.Context{
+		Client: cfg.Client,
+		Owner:  cfg.Owner,
+		Repo:   cfg.Repo,
+		Config: cfg.Config,
+	}
 
 	m := Model{
 		commandBar:  commandbar.New(),

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/blakewilliams/ghq/internal/cache"
+	"github.com/blakewilliams/ghq/internal/config"
 	"github.com/blakewilliams/ghq/internal/git"
 	"github.com/blakewilliams/ghq/internal/github"
 	"github.com/blakewilliams/ghq/internal/ui"
@@ -39,11 +40,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	cfg, err := config.Load()
+	if err != nil {
+		// Non-fatal — fall back to defaults but warn.
+		fmt.Fprintf(os.Stderr, "Warning: failed to load config: %v\n", err)
+		cfg = config.Default()
+	}
+
 	p := tea.NewProgram(ui.NewApp(ui.AppConfig{
 		Client:   cachedClient,
 		Owner:    detectedOwner,
 		Repo:     detectedRepo,
 		RepoRoot: repoRoot,
+		Config:   cfg,
 	}))
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

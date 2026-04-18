@@ -393,6 +393,17 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 			return m, cmd
 		}
 
+	case uictx.SelectFileMsg:
+		for i, f := range m.dv.Files {
+			if f.Filename == msg.Filename {
+				m.dv.Tree.Cursor = m.dv.Tree.IndexForFile(i)
+				m.dv.Tree.Focused = false
+				cmd := m.selectTreeEntry()
+				return m, cmd
+			}
+		}
+		return m, nil
+
 	case descRenderedMsg:
 		if msg.prNumber == m.pr.Number {
 			m.descContent = msg.content

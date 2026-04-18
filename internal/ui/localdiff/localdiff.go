@@ -643,6 +643,16 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 		}
 		return m, nil
 
+	case uictx.SelectFileMsg:
+		idx := m.fileIndexForPath(msg.Filename)
+		if idx < 0 {
+			return m, nil
+		}
+		m.dv.Tree.Cursor = m.dv.Tree.IndexForFile(idx)
+		m.dv.Tree.Focused = false
+		cmd := m.selectTreeEntry()
+		return m, cmd
+
 	case tea.KeyPressMsg:
 		var cmd tea.Cmd
 		var handled bool

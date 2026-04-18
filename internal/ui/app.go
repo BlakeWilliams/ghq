@@ -431,46 +431,57 @@ func (m Model) renderStatusBar() string {
 	return left + barStyle.Render(strings.Repeat(" ", gap)) + right
 }
 
-// barBackground computes the status bar background by shifting the terminal
-// background color slightly: lighter in dark mode, darker in light mode.
+// barBackground computes the status bar background using vim-airline style
+// factor-based lightening/darkening of the terminal background.
+//   lighten: color + (255 - color) * factor
+//   darken:  color * (1 - factor)
 func (m Model) barBackground() color.Color {
 	if m.termBg == nil {
-		// Fall back to ANSI colors derived from colorscheme.
 		if m.hasDarkBg {
 			return lipgloss.Black
 		}
 		return lipgloss.White
 	}
 	r, g, b, _ := m.termBg.RGBA()
-	shift := 13
-	if !m.hasDarkBg {
-		shift = -13
+	rf, gf, bf := float64(r>>8), float64(g>>8), float64(b>>8)
+	const factor = 0.10
+	if m.hasDarkBg {
+		// Lighten
+		return lipgloss.Color(fmt.Sprintf("#%02x%02x%02x",
+			int(rf+(255-rf)*factor),
+			int(gf+(255-gf)*factor),
+			int(bf+(255-bf)*factor)))
 	}
+	// Darken
 	return lipgloss.Color(fmt.Sprintf("#%02x%02x%02x",
-		clampByte(int(r>>8)+shift),
-		clampByte(int(g>>8)+shift),
-		clampByte(int(b>>8)+shift)))
+		int(rf*(1-factor)),
+		int(gf*(1-factor)),
+		int(bf*(1-factor))))
 }
 
-// barForeground computes the status bar text color by shifting the terminal
-// background toward the opposite end — enough contrast to read but not harsh.
+// barForeground computes the status bar text color. Uses luminance to pick
+// a contrast-appropriate shade, matching vim-airline's approach:
+//   luminance = 0.299*R + 0.587*G + 0.114*B
 func (m Model) barForeground() color.Color {
 	if m.termBg == nil {
-		// Fall back to ANSI colors derived from colorscheme.
 		if m.hasDarkBg {
 			return lipgloss.BrightBlack
 		}
 		return lipgloss.BrightBlack
 	}
 	r, g, b, _ := m.termBg.RGBA()
-	shift := 130
-	if !m.hasDarkBg {
-		shift = -130
+	rf, gf, bf := float64(r>>8), float64(g>>8), float64(b>>8)
+	const factor = 0.55
+	if m.hasDarkBg {
+		return lipgloss.Color(fmt.Sprintf("#%02x%02x%02x",
+			int(rf+(255-rf)*factor),
+			int(gf+(255-gf)*factor),
+			int(bf+(255-bf)*factor)))
 	}
 	return lipgloss.Color(fmt.Sprintf("#%02x%02x%02x",
-		clampByte(int(r>>8)+shift),
-		clampByte(int(g>>8)+shift),
-		clampByte(int(b>>8)+shift)))
+		int(rf*(1-factor)),
+		int(gf*(1-factor)),
+		int(bf*(1-factor))))
 }
 
 func clampByte(v int) int {

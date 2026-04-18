@@ -2,6 +2,7 @@ package styles
 
 import (
 	"image/color"
+	"strings"
 
 	"charm.land/lipgloss/v2"
 )
@@ -67,12 +68,14 @@ var (
 			Foreground(lipgloss.BrightBlack)
 )
 
-// AirlineModeColor returns the background color for a diff mode in the
-// vim-airline style status bar. Uses ANSI colors so they derive from the
-// terminal colorscheme.
-func AirlineModeColor(mode interface{ String() string }) color.Color {
-	switch mode.String() {
-	case "working":
+// ModeColor returns the ANSI background color for a diff mode badge.
+// Maps to lualine-style highlight groups from the terminal colorscheme:
+//   - working → Magenta (like normal mode, PmenuSel)
+//   - staged  → Green   (like insert mode, String/MoreMsg)
+//   - branch  → Blue    (like visual mode, Special/Boolean)
+func ModeColor(mode interface{ String() string }) color.Color {
+	switch strings.ToLower(mode.String()) {
+	case "unstaged", "working":
 		return lipgloss.Magenta
 	case "staged":
 		return lipgloss.Green

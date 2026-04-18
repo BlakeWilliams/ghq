@@ -735,20 +735,34 @@ func (d DiffViewer) RenderLayout(rightView string, rightTitle string, info Layou
 			leftPart = chrome.Render(strings.Repeat("─", treeW-1))
 		} else if i == branchRow {
 			// Branch name (left) + PR badge (right).
-			branchText := ""
-			if info.BranchName != "" {
-				branchText = dim.Render(" " + info.BranchName)
-			}
 			prText := ""
+			prW := 0
 			if info.PR != nil {
 				prURL := fmt.Sprintf("https://github.com/%s/%s/pull/%d", info.PR.RepoOwner(), info.PR.RepoName(), info.PR.Number)
 				prStyle := lipgloss.NewStyle().
 					Foreground(lipgloss.Cyan).
 					Hyperlink(prURL)
 				prText = prStyle.Render(fmt.Sprintf("PR#%d", info.PR.Number)) + " "
+				prW = lipgloss.Width(prText)
+			}
+			branchText := ""
+			if info.BranchName != "" {
+				name := info.BranchName
+				// usable = treeW-1; branchText = " "+name; need gap>=1 when PR present
+				minGap := 0
+				if prW > 0 {
+					minGap = 1
+				}
+				maxW := treeW - 1 - prW - minGap - 1 // -1 for leading space in branchText
+				if maxW < 4 {
+					maxW = 4
+				}
+				if len(name) > maxW {
+					name = name[:maxW-1] + "…"
+				}
+				branchText = dim.Render(" " + name)
 			}
 			branchW := lipgloss.Width(branchText)
-			prW := lipgloss.Width(prText)
 			gap := treeW - 1 - branchW - prW
 			if gap < 0 {
 				gap = 0

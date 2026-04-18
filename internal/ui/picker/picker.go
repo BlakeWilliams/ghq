@@ -35,8 +35,9 @@ type Model struct {
 }
 
 type scoredItem struct {
-	index int
-	score int
+	index          int
+	score          int
+	matchPositions []int // character indices in Label that matched the query
 }
 
 var (
@@ -47,6 +48,7 @@ var (
 	pointerStyle   = lipgloss.NewStyle().Foreground(lipgloss.Yellow).Bold(true)
 	selectedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Yellow).Bold(true)
 	selectedDesc   = lipgloss.NewStyle().Foreground(lipgloss.BrightBlack)
+	matchStyle     = lipgloss.NewStyle().Foreground(lipgloss.Green).Bold(true)
 )
 
 // New creates a picker with the given title and items.
@@ -173,14 +175,21 @@ func (m Model) View() string {
 		si := m.filtered[i]
 		item := m.items[si.index]
 
+		label := highlightMatches(item.Label, si.matchPositions, i == m.cursor)
+		var line string
 		if i == m.cursor {
 			pointer := pointerStyle.Render("█")
-			line := pointer + " " + selectedStyle.Render(item.Label) + "  " + selectedDesc.Render(item.Description)
-			b.WriteString(pad(line) + "\n")
+			line = pointer + " " + label
+			if item.Description != "" {
+				line += "  " + selectedDesc.Render(item.Description)
+			}
 		} else {
-			line := "  " + item.Label + "  " + descStyle.Render(item.Description)
-			b.WriteString(pad(line) + "\n")
+			line = "  " + label
+			if item.Description != "" {
+				line += "  " + descStyle.Render(item.Description)
+			}
 		}
+		b.WriteString(pad(line) + "\n")
 	}
 
 	// Pad remaining lines if fewer items than maxVisible.
@@ -214,12 +223,11 @@ func (m *Model) filter() {
 		}
 	} else {
 		queryLower := strings.ToLower(m.query)
-		queryWords := strings.Fields(queryLower)
 
 		for i, item := range m.items {
-			score := scoreItem(item, queryWords, queryLower)
+			score, positions := scoreItem(item, queryLower)
 			if score > 0 {
-				m.filtered = append(m.filtered, scoredItem{index: i, score: score})
+				m.filtered = append(m.filtered, scoredItem{index: i, score: score, matchPositions: positions})
 			}
 		}
 
@@ -237,56 +245,110 @@ func (m *Model) filter() {
 	}
 }
 
-// scoreItem returns a fuzzy match score for an item against the query.
-// Returns 0 if no match. Uses character-by-character fuzzy matching —
-// query chars must appear in order but not contiguously.
-func scoreItem(item Item, queryWords []string, queryFull string) int {
-	fields := []string{
-		strings.ToLower(item.Label),
-		strings.ToLower(item.Description),
-		strings.ToLower(item.Value),
-	}
-	for _, kw := range item.Keywords {
-		fields = append(fields, strings.ToLower(kw))
-	}
-	text := strings.Join(fields, " ")
+// scoreItem scores an item against a lowercased query.
+// Returns score and match positions within the Label (for highlighting).
+// Matches each field individually to avoid cross-field false matches.
+func scoreItem(item Item, query string) (int, []int) {
+	labelLower := strings.ToLower(item.Label)
 
-	// Try fuzzy match on the combined text.
-	score := fuzzyScore(text, queryFull)
-	if score == 0 {
-		return 0
+	// Primary: match the Label (what the user sees).
+	labelScore, positions := fuzzyMatch(labelLower, query)
+
+	// Secondary: match other distinct fields for keyword/description matches.
+	var altScore int
+	seen := map[string]bool{labelLower: true}
+
+	for _, field := range itemAltFields(item) {
+		fl := strings.ToLower(field)
+		if seen[fl] || fl == "" {
+			continue
+		}
+		seen[fl] = true
+		s, _ := fuzzyMatch(fl, query)
+		if s > altScore {
+			altScore = s
+		}
 	}
 
-	// Bonus for matching the label specifically.
-	labelScore := fuzzyScore(strings.ToLower(item.Label), queryFull)
-	if labelScore > 0 {
-		score += labelScore
+	if labelScore == 0 && altScore == 0 {
+		return 0, nil
 	}
 
-	// Bonus for contiguous substring match.
-	if strings.Contains(text, queryFull) {
+	// Label match is weighted 2x — it's the visible text.
+	score := labelScore*2 + altScore
+
+	// Bonus for contiguous substring match in label.
+	if strings.Contains(labelLower, query) {
 		score += 20
 	}
 
-	return score
+	return score, positions
 }
 
-// fuzzyScore checks if all chars in query appear in text in order.
-// Returns 0 if no match, higher scores for better matches.
-// Rewards: consecutive chars, word-boundary matches, shorter gaps.
-func fuzzyScore(text, query string) int {
+// itemAltFields returns the non-Label fields of an item for secondary matching.
+func itemAltFields(item Item) []string {
+	fields := make([]string, 0, 2+len(item.Keywords))
+	if item.Description != "" {
+		fields = append(fields, item.Description)
+	}
+	if item.Value != "" {
+		fields = append(fields, item.Value)
+	}
+	fields = append(fields, item.Keywords...)
+	return fields
+}
+
+// fuzzyMatch finds the best fuzzy subsequence match of query in text.
+// Tries multiple starting positions and returns the highest-scoring alignment.
+// Rewards: consecutive chars, word-boundary matches, tail position (filename > dir).
+// Returns rune-based positions suitable for highlighting the original (pre-lowered) text.
+func fuzzyMatch(text, query string) (int, []int) {
 	if len(query) == 0 {
-		return 1
+		return 1, nil
 	}
 
+	textRunes := []rune(text)
+	queryRunes := []rune(query)
+
+	// Find all rune positions where query[0] occurs — each is a candidate start.
+	var starts []int
+	for i, r := range textRunes {
+		if r == queryRunes[0] {
+			starts = append(starts, i)
+		}
+	}
+	if len(starts) == 0 {
+		return 0, nil
+	}
+
+	var bestScore int
+	var bestPositions []int
+
+	for _, start := range starts {
+		score, positions := fuzzyMatchFrom(textRunes, queryRunes, start)
+		if score > bestScore {
+			bestScore = score
+			bestPositions = positions
+		}
+	}
+
+	return bestScore, bestPositions
+}
+
+// fuzzyMatchFrom runs a greedy match starting at startIdx for query[0].
+// text and query are rune slices; returned positions are rune indices.
+func fuzzyMatchFrom(text, query []rune, startIdx int) (int, []int) {
+	textLen := len(text)
 	queryIdx := 0
 	score := 0
 	lastMatchPos := -1
 	consecutive := 0
+	positions := make([]int, 0, len(query))
 
-	for textIdx := 0; textIdx < len(text) && queryIdx < len(query); textIdx++ {
+	for textIdx := startIdx; textIdx < textLen && queryIdx < len(query); textIdx++ {
 		if text[textIdx] == query[queryIdx] {
 			queryIdx++
+			positions = append(positions, textIdx)
 			pts := 1
 
 			// Consecutive bonus.
@@ -297,14 +359,20 @@ func fuzzyScore(text, query string) int {
 				consecutive = 0
 			}
 
-			// Word boundary bonus (start of text or after space/separator).
-			if textIdx == 0 || text[textIdx-1] == ' ' || text[textIdx-1] == '_' || text[textIdx-1] == '-' || text[textIdx-1] == '/' {
+			// Word boundary bonus (start of text or after separator).
+			if textIdx == 0 || text[textIdx-1] == ' ' || text[textIdx-1] == '_' || text[textIdx-1] == '-' || text[textIdx-1] == '/' || text[textIdx-1] == '.' {
 				pts += 5
 			}
 
 			// Prefix bonus.
-			if textIdx == queryIdx-1 {
+			if textIdx == startIdx+queryIdx-1 {
 				pts += 3
+			}
+
+			// Tail bias: matches closer to the end score higher.
+			// For file paths this favors the filename over directories.
+			if textLen > 1 {
+				pts += 10 * textIdx / (textLen - 1)
 			}
 
 			score += pts
@@ -313,10 +381,40 @@ func fuzzyScore(text, query string) int {
 	}
 
 	if queryIdx < len(query) {
-		return 0 // not all query chars matched
+		return 0, nil
 	}
 
-	return score
+	return score, positions
+}
+
+// highlightMatches renders a label with matched character positions highlighted.
+func highlightMatches(label string, positions []int, selected bool) string {
+	if len(positions) == 0 {
+		if selected {
+			return selectedStyle.Render(label)
+		}
+		return label
+	}
+
+	posSet := make(map[int]bool, len(positions))
+	for _, p := range positions {
+		posSet[p] = true
+	}
+
+	var b strings.Builder
+	runeIdx := 0
+	for _, ch := range label {
+		s := string(ch)
+		if posSet[runeIdx] {
+			b.WriteString(matchStyle.Render(s))
+		} else if selected {
+			b.WriteString(selectedStyle.Render(s))
+		} else {
+			b.WriteString(s)
+		}
+		runeIdx++
+	}
+	return b.String()
 }
 
 func itoa(n int) string {

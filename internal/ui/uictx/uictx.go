@@ -20,6 +20,12 @@ type PRLoadedMsg struct {
 	PR github.PullRequest
 }
 
+// SelectFileMsg is sent when the user picks a file from the file picker.
+// Views that show a file tree should jump to and open the named file.
+type SelectFileMsg struct {
+	Filename string
+}
+
 // FetchPR returns a tea.Cmd that fetches a single PR by owner/repo/number.
 func FetchPR(c *github.CachedClient, owner, repo string, number int) tea.Cmd {
 	return func() tea.Msg {

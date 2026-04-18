@@ -235,6 +235,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pickerKind = "command"
 			m.picker = picker.New("Commands", m.commandPickerItems(), m.pickerInnerWidth(), m.height-chromeHeight)
 			return m, nil
+		case "ctrl+p":
+			items := m.filePickerItems()
+			if len(items) == 0 {
+				return m, nil
+			}
+			m.mode = modePicker
+			m.pickerKind = "file"
+			m.picker = picker.New("Files", items, m.pickerInnerWidth(), m.height-chromeHeight)
+			return m, nil
 		case "?":
 			m.mode = modePicker
 			m.pickerKind = "help"
@@ -245,8 +254,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case picker.ResultMsg:
+		kind := m.pickerKind
 		m.mode = modeNormal
 		m.pickerKind = ""
+
+		if kind == "file" {
+			if !msg.Selected || msg.Value == "" {
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.activeView, cmd = m.activeView.Update(uictx.SelectFileMsg{Filename: msg.Value})
+			return m, cmd
+		}
 
 		if !msg.Selected && msg.Value != "" {
 			// Raw query — try line number.
@@ -556,6 +575,40 @@ func (m Model) renderChatOverlay(bg string, bgHeight int) string {
 	return strings.Join(bgLines, "\n")
 }
 
+// filesProvider lets the file picker discover files from any active view
+// that exposes a tree of files in its sidebar.
+type filesProvider interface {
+	Files() []github.PullRequestFile
+}
+
+// filePickerItems returns picker items for every file currently shown in
+// the active view's file sidebar. Returns nil if the active view has no
+// file list.
+func (m Model) filePickerItems() []picker.Item {
+	provider, ok := m.activeView.(filesProvider)
+	if !ok {
+		return nil
+	}
+	files := provider.Files()
+	items := make([]picker.Item, 0, len(files))
+	for _, f := range files {
+		items = append(items, picker.Item{
+			Label: f.Filename,
+			Value: f.Filename,
+		})
+	}
+	return items
+}
+
+// splitPath returns (dir, base) for a file path. dir is "" for top-level files.
+func splitPath(p string) (string, string) {
+	idx := strings.LastIndexByte(p, '/')
+	if idx < 0 {
+		return "", p
+	}
+	return p[:idx], p[idx+1:]
+}
+
 func (m Model) commandPickerItems() []picker.Item {
 	items := []picker.Item{
 		{Label: "Working Tree", Description: "Uncommitted changes", Value: "working", Keywords: []string{"mode", "unstaged"}},
@@ -563,7 +616,7 @@ func (m Model) commandPickerItems() []picker.Item {
 	}
 
 	branch, _ := git.CurrentBranch(m.repoRoot)
-	defaultBranch, _ := git.DefaultBranch(m.repoRoot)
+	defaultBranch, _ := git.DefaultBranchShort(m.repoRoot)
 	if branch != defaultBranch {
 		items = append(items, picker.Item{Label: "Branch Diff", Description: "vs " + defaultBranch, Value: "branch", Keywords: []string{"mode", "compare"}})
 	}
@@ -579,6 +632,7 @@ func (m Model) helpPickerItems() []picker.Item {
 	items := []picker.Item{
 		{Label: ":", Description: "Open command picker", Keywords: []string{"command", "menu"}},
 		{Label: "?", Description: "Open help", Keywords: []string{"keybindings", "shortcuts"}},
+		{Label: "ctrl+p", Description: "Fuzzy find a file in the sidebar", Keywords: []string{"file", "find", "fuzzy", "open"}},
 		{Label: "C", Description: "Copilot chat", Keywords: []string{"ai", "copilot"}},
 		{Label: "ctrl+c", Description: "Quit"},
 	}

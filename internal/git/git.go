@@ -80,21 +80,29 @@ func HasCommits(dir string) bool {
 	return cmd.Run() == nil
 }
 
-// DefaultBranch tries to detect the default branch (main, master, etc.).
+// DefaultBranch tries to detect the default branch, preferring the remote
+// tracking ref (e.g. "origin/main") when origin is available.
 func DefaultBranch(dir string) (string, error) {
 	// Try symbolic ref of origin/HEAD first.
 	cmd := exec.Command("git", "-C", dir, "symbolic-ref", "refs/remotes/origin/HEAD")
 	out, err := cmd.Output()
 	if err == nil {
 		ref := strings.TrimSpace(string(out))
-		// refs/remotes/origin/main -> main
+		// refs/remotes/origin/main -> origin/main
 		parts := strings.Split(ref, "/")
 		if len(parts) > 0 {
-			return parts[len(parts)-1], nil
+			name := parts[len(parts)-1]
+			return "origin/" + name, nil
 		}
 	}
 
-	// Fallback: check if main or master exists.
+	// Fallback: check if origin/main or origin/master exists, then local.
+	for _, branch := range []string{"main", "master"} {
+		cmd = exec.Command("git", "-C", dir, "rev-parse", "--verify", "refs/remotes/origin/"+branch)
+		if err := cmd.Run(); err == nil {
+			return "origin/" + branch, nil
+		}
+	}
 	for _, branch := range []string{"main", "master"} {
 		cmd = exec.Command("git", "-C", dir, "rev-parse", "--verify", "refs/heads/"+branch)
 		if err := cmd.Run(); err == nil {
@@ -103,6 +111,18 @@ func DefaultBranch(dir string) (string, error) {
 	}
 
 	return "main", nil // default fallback
+}
+
+// DefaultBranchShort returns just the branch name without the remote prefix.
+func DefaultBranchShort(dir string) (string, error) {
+	branch, err := DefaultBranch(dir)
+	if err != nil {
+		return branch, err
+	}
+	if after, ok := strings.CutPrefix(branch, "origin/"); ok {
+		return after, nil
+	}
+	return branch, nil
 }
 
 // MergeBase returns the merge-base commit between the given branch and HEAD.

@@ -713,6 +713,16 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 		}
 		return m, nil
 
+	case uictx.SelectFileMsg:
+		idx := m.fileIndexForPath(msg.Filename)
+		if idx < 0 {
+			return m, nil
+		}
+		m.dv.Tree.Cursor = m.dv.Tree.IndexForFile(idx)
+		m.dv.Tree.Focused = false
+		cmd := m.selectTreeEntry()
+		return m, cmd
+
 	case tea.KeyPressMsg:
 		var cmd tea.Cmd
 		var handled bool
@@ -833,7 +843,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 	case "m":
 		// Cycle diff mode: Working → Staged → Branch (skip Branch on default branch).
 		m.saveViewState()
-		defaultBranch, _ := git.DefaultBranch(m.repoRoot)
+		defaultBranch, _ := git.DefaultBranchShort(m.repoRoot)
 		if m.branchData.branch == defaultBranch {
 			if m.mode == git.DiffWorking {
 				m.mode = git.DiffStaged
@@ -2133,7 +2143,7 @@ func (m Model) buildViewPickerItems() []picker.Item {
 		},
 	}
 
-	defaultBranch, _ := git.DefaultBranch(m.repoRoot)
+	defaultBranch, _ := git.DefaultBranchShort(m.repoRoot)
 	if m.branchData.branch != defaultBranch {
 		items = append(items, picker.Item{
 			Label:       "Branch Diff",

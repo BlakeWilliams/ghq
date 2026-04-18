@@ -401,8 +401,9 @@ func (m Model) renderStatusBar() string {
 	// Bar background: slightly lighter than terminal bg in dark mode,
 	// slightly darker in light mode.
 	barBg := m.barBackground()
-	barStyle := lipgloss.NewStyle().Foreground(lipgloss.BrightBlack).Background(barBg)
-	branchStyle := lipgloss.NewStyle().Foreground(lipgloss.BrightWhite).Background(barBg)
+	barFg := m.barForeground()
+	barStyle := lipgloss.NewStyle().Foreground(barFg).Background(barBg)
+	branchStyle := lipgloss.NewStyle().Foreground(barFg).Background(barBg)
 
 	// Left: MODE ▶ • branch
 	modeToBar := lipgloss.NewStyle().Foreground(modeBg).Background(barBg).Render(plRight)
@@ -434,14 +435,12 @@ func (m Model) renderStatusBar() string {
 // background color slightly: lighter in dark mode, darker in light mode.
 func (m Model) barBackground() color.Color {
 	if m.termBg == nil {
-		// No terminal response yet — use a sensible default.
 		if m.hasDarkBg {
 			return lipgloss.Color("#1c1c1c")
 		}
 		return lipgloss.Color("#e4e4e4")
 	}
 	r, g, b, _ := m.termBg.RGBA()
-	// Shift by ~8% of the 0-255 range (≈20 units).
 	if m.hasDarkBg {
 		return lipgloss.Color(fmt.Sprintf("#%02x%02x%02x",
 			clampByte(int(r>>8)+13),
@@ -452,6 +451,26 @@ func (m Model) barBackground() color.Color {
 		clampByte(int(r>>8)-13),
 		clampByte(int(g>>8)-13),
 		clampByte(int(b>>8)-13)))
+}
+
+// barForeground computes the status bar text color by shifting the terminal
+// background toward the opposite end — enough contrast to read but not harsh.
+func (m Model) barForeground() color.Color {
+	if m.termBg == nil {
+		if m.hasDarkBg {
+			return lipgloss.Color("#808080")
+		}
+		return lipgloss.Color("#585858")
+	}
+	r, g, b, _ := m.termBg.RGBA()
+	shift := 100
+	if !m.hasDarkBg {
+		shift = -100
+	}
+	return lipgloss.Color(fmt.Sprintf("#%02x%02x%02x",
+		clampByte(int(r>>8)+shift),
+		clampByte(int(g>>8)+shift),
+		clampByte(int(b>>8)+shift)))
 }
 
 func clampByte(v int) int {

@@ -14,14 +14,20 @@ import (
 // FileChangedMsg signals that files in the repo changed.
 type FileChangedMsg struct{}
 
+// BranchChangedMsg signals that the current branch (HEAD) changed.
+type BranchChangedMsg struct {
+	Branch string
+}
+
 // Watcher watches a git repository for file changes and produces
 // debounced FileChangedMsg events for the Bubble Tea message loop.
 type Watcher struct {
-	fsw      *fsnotify.Watcher
-	repoRoot string
-	events   chan struct{}
-	done     chan struct{}
-	once     sync.Once
+	fsw        *fsnotify.Watcher
+	repoRoot   string
+	events     chan struct{}
+	headEvents chan string // new branch name when HEAD changes
+	done       chan struct{}
+	once       sync.Once
 }
 
 // New creates a watcher for the given repo root. It watches:
@@ -36,14 +42,21 @@ func New(repoRoot string, changedDirs []string) (*Watcher, error) {
 	}
 
 	w := &Watcher{
-		fsw:      fsw,
-		repoRoot: repoRoot,
-		events:   make(chan struct{}, 1),
-		done:     make(chan struct{}),
+		fsw:        fsw,
+		repoRoot:   repoRoot,
+		events:     make(chan struct{}, 1),
+		headEvents: make(chan string, 1),
+		done:       make(chan struct{}),
 	}
 
 	// Watch the repo root for top-level file changes.
 	fsw.Add(repoRoot)
+
+	// Watch .git/ directory for HEAD changes (branch switches).
+	gitDir := filepath.Join(repoRoot, ".git")
+	if info, err := os.Stat(gitDir); err == nil && info.IsDir() {
+		fsw.Add(gitDir)
+	}
 
 	// Watch .git/refs/heads/ recursively to detect commits.
 	addDirRecursive(fsw, filepath.Join(repoRoot, ".git", "refs", "heads"))
@@ -71,6 +84,8 @@ func New(repoRoot string, changedDirs []string) (*Watcher, error) {
 func (w *Watcher) loop() {
 	const debounce = 500 * time.Millisecond
 	var timer *time.Timer
+	var headTimer *time.Timer
+	headFile := filepath.Join(w.repoRoot, ".git", "HEAD")
 
 	for {
 		select {
@@ -83,6 +98,26 @@ func (w *Watcher) loop() {
 				!event.Has(fsnotify.Remove) && !event.Has(fsnotify.Rename) {
 				continue
 			}
+
+			// Detect HEAD change (branch switch) before git internal filter.
+			if event.Name == headFile {
+				if headTimer != nil {
+					headTimer.Stop()
+				}
+				headTimer = time.AfterFunc(debounce, func() {
+					branch := readBranch(w.repoRoot)
+					if branch != "" {
+						// Drain stale value so latest branch wins.
+						select {
+						case <-w.headEvents:
+						default:
+						}
+						w.headEvents <- branch
+					}
+				})
+				continue
+			}
+
 			// Ignore anything inside .git/.
 			if isGitInternal(w.repoRoot, event.Name) {
 				continue
@@ -111,6 +146,9 @@ func (w *Watcher) loop() {
 			if timer != nil {
 				timer.Stop()
 			}
+			if headTimer != nil {
+				headTimer.Stop()
+			}
 			return
 		}
 	}
@@ -137,6 +175,18 @@ func (w *Watcher) WaitCmd() tea.Cmd {
 		select {
 		case <-w.events:
 			return FileChangedMsg{}
+		case <-w.done:
+			return nil
+		}
+	}
+}
+
+// BranchWaitCmd returns a tea.Cmd that blocks until HEAD changes (branch switch).
+func (w *Watcher) BranchWaitCmd() tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case branch := <-w.headEvents:
+			return BranchChangedMsg{Branch: branch}
 		case <-w.done:
 			return nil
 		}
@@ -213,4 +263,19 @@ func DirsFromFiles(filenames []string) []string {
 		}
 	}
 	return dirs
+}
+
+// readBranch reads the current branch name from .git/HEAD.
+// Returns "" for detached HEAD or on error.
+func readBranch(repoRoot string) string {
+	data, err := os.ReadFile(filepath.Join(repoRoot, ".git", "HEAD"))
+	if err != nil {
+		return ""
+	}
+	ref := strings.TrimSpace(string(data))
+	const prefix = "ref: refs/heads/"
+	if strings.HasPrefix(ref, prefix) {
+		return ref[len(prefix):]
+	}
+	return ""
 }

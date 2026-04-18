@@ -551,7 +551,7 @@ func (m ChatModel) sendTocopilot(body string) tea.Cmd {
 	}
 
 	prompt := ctx.String() + "User: " + body
-	return m.client.SendComment("chat", body, "", "", "", prompt, nil)
+	return m.client.SendComment("chat", body, "", "", prompt, nil)
 }
 
 func wordWrap(line string, width int) []string {

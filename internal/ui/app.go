@@ -292,7 +292,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.copilotChat, cmd = m.copilotChat.Update(msg)
 			return m, cmd
 		}
-		return m, nil
+		var cmd tea.Cmd
+		m.activeView, cmd = m.activeView.Update(msg)
+		return m, cmd
 
 	default:
 		if m.mode == modeCommand {

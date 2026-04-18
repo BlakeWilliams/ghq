@@ -94,7 +94,7 @@ func (c *Client) ListenCmd() tea.Cmd {
 
 // SendComment sends a comment with diff context to Copilot and streams back replies.
 // Each comment gets its own session so multiple can run in parallel.
-func (c *Client) SendComment(commentID, body, filePath, fileContent, fullDiff, diffHunk string, threadHistory []string) tea.Cmd {
+func (c *Client) SendComment(commentID, body, filePath, diffMode, diffHunk string, threadHistory []string) tea.Cmd {
 	return func() tea.Msg {
 		select {
 		case <-c.ready:
@@ -122,9 +122,19 @@ func (c *Client) SendComment(commentID, body, filePath, fileContent, fullDiff, d
 
 		// Channel to cancel the timeout when session completes.
 		done := make(chan struct{})
+		// Activity channel — any event resets the timeout.
+		activity := make(chan struct{}, 1)
 
 		// Attach a listener that tags all events with this commentID.
 		session.On(func(event sdk.SessionEvent) {
+			c.log.Printf("event for %s: type=%s", commentID, event.Type)
+
+			// Signal activity to reset the timeout.
+			select {
+			case activity <- struct{}{}:
+			default:
+			}
+
 			switch event.Type {
 			case sdk.SessionEventTypeAssistantMessageDelta:
 				if event.Data.DeltaContent != nil && *event.Data.DeltaContent != "" {
@@ -162,10 +172,10 @@ func (c *Client) SendComment(commentID, body, filePath, fileContent, fullDiff, d
 			}
 		})
 
-		prompt := buildReviewPrompt(body, filePath, fileContent, fullDiff, diffHunk, threadHistory)
+		prompt := buildReviewPrompt(body, filePath, diffMode, diffHunk, threadHistory)
 		c.log.Printf("sending prompt (%d chars) for comment %s", len(prompt), commentID)
 
-		_, err = session.Send(c.ctx, sdk.MessageOptions{
+		msgID, err := session.Send(c.ctx, sdk.MessageOptions{
 			Prompt: prompt,
 		})
 		if err != nil {
@@ -175,18 +185,24 @@ func (c *Client) SendComment(commentID, body, filePath, fileContent, fullDiff, d
 			return ErrorMsg{CommentID: commentID, Err: fmt.Errorf("send: %w", err)}
 		}
 
-		c.log.Printf("session.Send returned for %s", commentID)
+		c.log.Printf("session.Send returned for %s: messageID=%s", commentID, msgID)
 
-		// Response timeout - cancelled if session completes first.
+		// Response timeout — resets on any activity from the session.
 		go func() {
-			select {
-			case <-done:
-				// Session completed, no timeout needed.
-				return
-			case <-time.After(60 * time.Second):
-				c.log.Printf("timeout waiting for copilot response for %s", commentID)
-				c.events <- ErrorMsg{CommentID: commentID, Err: fmt.Errorf("copilot response timeout (60s)")}
-				session.Disconnect()
+			timer := time.NewTimer(60 * time.Second)
+			defer timer.Stop()
+			for {
+				select {
+				case <-done:
+					return
+				case <-activity:
+					timer.Reset(60 * time.Second)
+				case <-timer.C:
+					c.log.Printf("timeout waiting for copilot response for %s", commentID)
+					c.events <- ErrorMsg{CommentID: commentID, Err: fmt.Errorf("copilot response timeout (60s)")}
+					session.Disconnect()
+					return
+				}
 			}
 		}()
 
@@ -195,25 +211,30 @@ func (c *Client) SendComment(commentID, body, filePath, fileContent, fullDiff, d
 }
 
 
-func buildReviewPrompt(comment, filePath, fileContent, fullDiff, diffHunk string, threadHistory []string) string {
+func buildReviewPrompt(comment, filePath, diffMode, diffHunk string, threadHistory []string) string {
 	var b strings.Builder
 	b.WriteString("You are reviewing local code changes. Respond concisely to the developer's comment about this diff.\n\n")
-	b.WriteString("File: " + filePath + "\n\n")
+	b.WriteString("File: " + filePath + "\n")
 
-	if fileContent != "" {
-		b.WriteString("Full file contents:\n```\n")
-		b.WriteString(fileContent)
-		b.WriteString("\n```\n\n")
+	// Mode-specific git instructions.
+	switch diffMode {
+	case "Unstaged":
+		b.WriteString("Diff mode: unstaged changes (working tree vs index).\n")
+		b.WriteString("To get the full diff: `git diff -- " + filePath + "`\n")
+		b.WriteString("To read the working tree version: `cat " + filePath + "`\n")
+	case "Staged":
+		b.WriteString("Diff mode: staged changes (index vs HEAD).\n")
+		b.WriteString("To get the full diff: `git diff --cached -- " + filePath + "`\n")
+		b.WriteString("To read the staged version: `git show :0:" + filePath + "`\n")
+	case "Branch":
+		b.WriteString("Diff mode: branch changes (current branch vs default branch merge-base).\n")
+		b.WriteString("To get the full diff: `git diff $(git merge-base origin/HEAD HEAD) -- " + filePath + "`\n")
+		b.WriteString("To read the current version: `cat " + filePath + "`\n")
 	}
-
-	if fullDiff != "" {
-		b.WriteString("Full diff for this file:\n```diff\n")
-		b.WriteString(fullDiff)
-		b.WriteString("\n```\n\n")
-	}
+	b.WriteString("\n")
 
 	if diffHunk != "" {
-		b.WriteString("Commented section (the comment is on this specific area):\n```diff\n")
+		b.WriteString("Commented section:\n```diff\n")
 		b.WriteString(diffHunk)
 		b.WriteString("\n```\n\n")
 	}

@@ -9,7 +9,6 @@ import (
 
 	"github.com/blakewilliams/ghq/internal/review/comments"
 	"github.com/blakewilliams/ghq/internal/review/copilot"
-	"github.com/blakewilliams/ghq/internal/git"
 	"github.com/blakewilliams/ghq/internal/github"
 	"github.com/blakewilliams/ghq/internal/git/watcher"
 	"github.com/blakewilliams/ghq/internal/ui/components"
@@ -554,6 +553,21 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
+	case copilot.ToolMsg:
+		if m.dv.CopilotToolState == nil {
+			m.dv.CopilotToolState = make(map[string]string)
+		}
+		if msg.Done {
+			delete(m.dv.CopilotToolState, msg.CommentID)
+		} else {
+			m.dv.CopilotToolState[msg.CommentID] = msg.Name
+		}
+		m.rebuildContent()
+		if m.dv.Copilot != nil {
+			return m, m.dv.Copilot.ListenCmd()
+		}
+		return m, nil
+
 	case watcher.RefChangedMsg:
 		// Branch ref changed — likely a push. Wait 2s for GitHub to process, then re-fetch.
 		return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
@@ -810,19 +824,8 @@ func (m Model) handleCommentKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 
 		if m.dv.Copilot != nil {
 			m.dv.SetCopilotPending(comment.ID, comment.Path, comment.Line, comment.Side)
-			var fileContent string
-			if m.repoRoot != "" {
-				fileContent, _ = git.FileContent(m.repoRoot, comment.Path)
-			}
-			fullDiff := ""
-			for _, f := range m.dv.Files {
-				if f.Filename == comment.Path {
-					fullDiff = f.Patch
-					break
-				}
-			}
 			return m, tea.Batch(
-				m.dv.Copilot.SendComment(comment.ID, body, comment.Path, fileContent, fullDiff, "", nil),
+				m.dv.Copilot.SendComment(comment.ID, body, comment.Path, "Branch", "", nil),
 				tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg { return copilotTickMsg{} }),
 			), true
 		}

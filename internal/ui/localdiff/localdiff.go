@@ -77,9 +77,9 @@ type prDetectFailedMsg struct{}
 
 var dimStyle = lipgloss.NewStyle().Foreground(lipgloss.BrightBlack)
 
-// branchPRContext holds state that is tied to the current branch and must be
+// branchData holds state that is tied to the current branch and must be
 // reset whenever the user switches branches.
-type branchPRContext struct {
+type branchData struct {
 	branch         string
 	pr             *github.PullRequest   // nil if no PR for this branch
 	prLoaded       bool                  // true once checked
@@ -95,8 +95,8 @@ type branchPRContext struct {
 	filePathIndex map[string]int
 }
 
-func newBranchPRContext(branch string) branchPRContext {
-	return branchPRContext{
+func newBranchData(branch string) branchData {
+	return branchData{
 		branch:            branch,
 		chromaHighlighted: make(map[int]bool),
 		fileCursors:       make(map[string]int),
@@ -111,7 +111,7 @@ type Model struct {
 
 	// Git state.
 	repoRoot string
-	bpc      branchPRContext
+	branchData      branchData
 	mode     git.DiffMode
 
 	// Mode used for last highlight generation (to invalidate cache on mode change).
@@ -165,7 +165,7 @@ func New(ctx *uictx.Context, repoRoot string, width, height int) Model {
 		ctx:           ctx,
 		dv:            dv,
 		repoRoot:      repoRoot,
-		bpc:           newBranchPRContext(branch),
+		branchData:           newBranchData(branch),
 		mode:          active.Mode,
 		watcher:       w,
 		commentStore:  cs,
@@ -177,9 +177,9 @@ func New(ctx *uictx.Context, repoRoot string, width, height int) Model {
 	return m
 }
 
-func (m Model) BranchName() string              { return m.bpc.branch }
+func (m Model) BranchName() string              { return m.branchData.branch }
 func (m Model) DiffMode() git.DiffMode          { return m.mode }
-func (m Model) PR() *github.PullRequest         { return m.bpc.pr }
+func (m Model) PR() *github.PullRequest         { return m.branchData.pr }
 func (m Model) Files() []github.PullRequestFile { return m.dv.Files }
 
 // CurrentFilename returns the filename currently being viewed, or "" if on overview.
@@ -258,12 +258,12 @@ func (m Model) saveViewState() {
 			}
 		}
 	}
-	comments.SaveViewState(m.repoRoot, m.bpc.branch, m.mode, comments.ViewState{
+	comments.SaveViewState(m.repoRoot, m.branchData.branch, m.mode, comments.ViewState{
 		Filename: filename,
 		LineNo:   lineNo,
 		Side:     side,
 	})
-	comments.SaveActiveState(m.repoRoot, m.bpc.branch, comments.ActiveState{Mode: m.mode})
+	comments.SaveActiveState(m.repoRoot, m.branchData.branch, comments.ActiveState{Mode: m.mode})
 }
 
 func (m Model) Init() tea.Cmd {
@@ -276,9 +276,9 @@ func (m Model) Init() tea.Cmd {
 		cmds = append(cmds, m.dv.Copilot.ListenCmd())
 	}
 	// Auto-detect PR for this branch (uses internal msg type so app doesn't intercept).
-	if !m.bpc.prLoaded {
+	if !m.branchData.prLoaded {
 		client := m.ctx.Client
-		branch := m.bpc.branch
+		branch := m.branchData.branch
 		cmds = append(cmds, func() tea.Msg {
 			pr, err := client.FetchPRByBranch(m.ctx.Owner, m.ctx.Repo, branch)
 			if err != nil {
@@ -427,7 +427,7 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 			m.restoreSavedPosition()
 		} else if currentFilename != "" {
 			// Re-resolve the file index by name after reload.
-			if idx, ok := m.bpc.filePathIndex[currentFilename]; ok {
+			if idx, ok := m.branchData.filePathIndex[currentFilename]; ok {
 				m.dv.CurrentFileIdx = idx
 				m.dv.Tree.Cursor = m.dv.Tree.IndexForFile(idx)
 			} else {
@@ -491,25 +491,25 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 		m.dv.FilesLoading = true
 		m.dv.CurrentFileIdx = -1
 		m.dv.Tree.Cursor = 0
-		m.bpc.fileCursors = make(map[string]int)
-		vs := comments.LoadViewState(m.repoRoot, m.bpc.branch, m.mode)
+		m.branchData.fileCursors = make(map[string]int)
+		vs := comments.LoadViewState(m.repoRoot, m.branchData.branch, m.mode)
 		m.savedFilename = vs.Filename
 		m.savedLineNo = vs.LineNo
 		m.savedSide = vs.Side
 		return m, m.loadDiff()
 
 	case prDetectedMsg:
-		m.bpc.pr = &msg.PR
-		m.bpc.prLoaded = true
+		m.branchData.pr = &msg.PR
+		m.branchData.prLoaded = true
 		return m, tea.Batch(m.fetchReviewComments(), m.reviewCommentsTimer())
 
 	case prDetectFailedMsg:
-		m.bpc.prLoaded = true
+		m.branchData.prLoaded = true
 		return m, nil
 
 	case reviewCommentsRefreshMsg:
-		m.bpc.reviewComments = msg.Comments
-		m.dv.Comments = commentStoreAdapter{store: m.commentStore, reviewComments: m.bpc.reviewComments}
+		m.branchData.reviewComments = msg.Comments
+		m.dv.Comments = commentStoreAdapter{store: m.commentStore, reviewComments: m.branchData.reviewComments}
 		// Re-format visible files to include new comments.
 		if m.dv.FilesHighlighted > 0 {
 			for i := 0; i < len(m.dv.Files); i++ {
@@ -520,7 +520,7 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 			m.dv.RebuildContentIfChanged(m.buildOverviewContent, m.buildFileContent)
 		}
 		// Re-arm the timer if we still have a PR.
-		if m.bpc.pr != nil {
+		if m.branchData.pr != nil {
 			return m, m.reviewCommentsTimer()
 		}
 		return m, nil
@@ -554,14 +554,14 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case watcher.BranchChangedMsg:
-		if msg.Branch != "" && msg.Branch != m.bpc.branch {
-			m.bpc = newBranchPRContext(msg.Branch)
+		if msg.Branch != "" && msg.Branch != m.branchData.branch {
+			m.branchData = newBranchData(msg.Branch)
 
 			cmds := []tea.Cmd{m.loadDiff()}
 
 			// Re-detect PR for new branch.
 			client := m.ctx.Client
-			branch := m.bpc.branch
+			branch := m.branchData.branch
 			cmds = append(cmds, func() tea.Msg {
 				pr, err := client.FetchPRByBranch(m.ctx.Owner, m.ctx.Repo, branch)
 				if err != nil {
@@ -595,7 +595,7 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 		}
 		m.dv.HighlightedFiles[msg.index] = msg.highlight
 		m.dv.FilesHighlighted++
-		m.bpc.chromaHighlighted[msg.index] = true
+		m.branchData.chromaHighlighted[msg.index] = true
 		// Stop spinner if this is the file we were waiting on.
 		if msg.index == m.dv.CurrentFileIdx {
 			m.dv.SpinnerActive = false
@@ -610,7 +610,7 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 		}
 		// Find the next file that needs Chroma highlighting.
 		for next := msg.index + 1; next < len(m.dv.Files); next++ {
-			if !m.bpc.chromaHighlighted[next] {
+			if !m.branchData.chromaHighlighted[next] {
 				return m, m.highlightFileCmd(next)
 			}
 		}
@@ -834,7 +834,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 		// Cycle diff mode: Working → Staged → Branch (skip Branch on default branch).
 		m.saveViewState()
 		defaultBranch, _ := git.DefaultBranch(m.repoRoot)
-		if m.bpc.branch == defaultBranch {
+		if m.branchData.branch == defaultBranch {
 			if m.mode == git.DiffWorking {
 				m.mode = git.DiffStaged
 			} else {
@@ -848,7 +848,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 		m.dv.FilesLoading = true
 		m.dv.CurrentFileIdx = -1
 		m.dv.Tree.Cursor = 0
-		vs := comments.LoadViewState(m.repoRoot, m.bpc.branch, m.mode)
+		vs := comments.LoadViewState(m.repoRoot, m.branchData.branch, m.mode)
 		m.savedFilename = vs.Filename
 		m.savedLineNo = vs.LineNo
 		m.savedSide = vs.Side
@@ -1024,8 +1024,8 @@ func (m Model) StatusHints() (left, right []string) {
 		}
 	}
 	modeStr := m.mode.String()
-	if m.bpc.pr != nil {
-		modeStr += fmt.Sprintf(" · PR #%d", m.bpc.pr.Number)
+	if m.branchData.pr != nil {
+		modeStr += fmt.Sprintf(" · PR #%d", m.branchData.pr.Number)
 	}
 	right = append(right, styles.StatusBarKey.Render("m")+" "+styles.StatusBarHint.Render(modeStr))
 	return
@@ -1063,8 +1063,8 @@ func (m Model) renderLayout(rightView string) string {
 	info := diffviewer.LayoutInfo{
 		ModeName:   m.mode.String(),
 		ModeColor:  styles.ModeColor(m.mode),
-		BranchName: m.bpc.branch,
-		PR:         m.bpc.pr,
+		BranchName: m.branchData.branch,
+		PR:         m.branchData.pr,
 	}
 	return m.dv.RenderLayout(rightView, rightTitle, info)
 }
@@ -1280,11 +1280,11 @@ func (m Model) commentsForFile(fileIdx int) []github.ReviewComment {
 
 // fetchReviewComments fetches GitHub review comments for the detected PR.
 func (m Model) fetchReviewComments() tea.Cmd {
-	if m.bpc.pr == nil {
+	if m.branchData.pr == nil {
 		return nil
 	}
 	client := m.ctx.Client
-	owner, repo, number := m.ctx.Owner, m.ctx.Repo, m.bpc.pr.Number
+	owner, repo, number := m.ctx.Owner, m.ctx.Repo, m.branchData.pr.Number
 	return func() tea.Msg {
 		data, found, refetch := client.GetReviewComments(owner, repo, number)
 		if refetch != nil {
@@ -1422,7 +1422,7 @@ func (m *Model) selectTreeEntry() tea.Cmd {
 	m.dv.SelectionAnchor = -1
 	// Save cursor position for the file we're leaving.
 	if m.dv.CurrentFileIdx >= 0 && m.dv.CurrentFileIdx < len(m.dv.Files) {
-		m.bpc.fileCursors[m.dv.Files[m.dv.CurrentFileIdx].Filename] = m.dv.DiffCursor
+		m.branchData.fileCursors[m.dv.Files[m.dv.CurrentFileIdx].Filename] = m.dv.DiffCursor
 	}
 	m.dv.ThreadCursor = 0
 	fileIdx := m.dv.Tree.FileIndex()
@@ -1435,7 +1435,7 @@ func (m *Model) selectTreeEntry() tea.Cmd {
 		return nil
 	}
 	m.dv.CurrentFileIdx = fileIdx
-	if saved, ok := m.bpc.fileCursors[m.dv.Files[fileIdx].Filename]; ok && saved < len(m.dv.FileDiffs[fileIdx]) {
+	if saved, ok := m.branchData.fileCursors[m.dv.Files[fileIdx].Filename]; ok && saved < len(m.dv.FileDiffs[fileIdx]) {
 		m.dv.DiffCursor = saved
 	} else {
 		m.dv.DiffCursor = m.dv.FirstNonHunkLine(fileIdx)
@@ -2134,7 +2134,7 @@ func (m Model) buildViewPickerItems() []picker.Item {
 	}
 
 	defaultBranch, _ := git.DefaultBranch(m.repoRoot)
-	if m.bpc.branch != defaultBranch {
+	if m.branchData.branch != defaultBranch {
 		items = append(items, picker.Item{
 			Label:       "Branch Diff",
 			Description: "vs " + defaultBranch,
@@ -2143,10 +2143,10 @@ func (m Model) buildViewPickerItems() []picker.Item {
 		})
 	}
 
-	if m.bpc.pr != nil {
+	if m.branchData.pr != nil {
 		items = append(items, picker.Item{
-			Label:       fmt.Sprintf("PR #%d", m.bpc.pr.Number),
-			Description: m.bpc.pr.Title,
+			Label:       fmt.Sprintf("PR #%d", m.branchData.pr.Number),
+			Description: m.branchData.pr.Title,
 			Value:       "pr",
 			Keywords:    []string{"pull request", "review"},
 		})
@@ -2156,16 +2156,16 @@ func (m Model) buildViewPickerItems() []picker.Item {
 }
 
 func (m Model) fileIndexForPath(path string) int {
-	if idx, ok := m.bpc.filePathIndex[path]; ok {
+	if idx, ok := m.branchData.filePathIndex[path]; ok {
 		return idx
 	}
 	return -1
 }
 
 func (m *Model) rebuildFilePathIndex() {
-	m.bpc.filePathIndex = make(map[string]int, len(m.dv.Files))
+	m.branchData.filePathIndex = make(map[string]int, len(m.dv.Files))
 	for i, f := range m.dv.Files {
-		m.bpc.filePathIndex[f.Filename] = i
+		m.branchData.filePathIndex[f.Filename] = i
 	}
 }
 

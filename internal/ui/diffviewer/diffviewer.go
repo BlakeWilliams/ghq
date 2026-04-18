@@ -79,10 +79,11 @@ type DiffViewer struct {
 	CommentStartSide string
 
 	// Copilot state
-	Copilot         *copilot.Client
-	CopilotReplyBuf map[string]string        // commentID -> accumulated reply content
-	CopilotPending  map[string]CopilotPendingInfo // commentID -> pending info
-	CopilotDots     int                      // shared animation frame (0-3)
+	Copilot          *copilot.Client
+	CopilotReplyBuf  map[string]string            // commentID -> accumulated reply content
+	CopilotPending   map[string]CopilotPendingInfo // commentID -> pending info
+	CopilotDots      int                           // shared animation frame (0-3)
+	CopilotToolState map[string]string             // commentID -> active tool name ("" if none)
 
 	// Comment source — set by outer model. Returns base comments for a file
 	// (without copilot pending, which DiffViewer appends itself).
@@ -655,9 +656,17 @@ func (d DiffViewer) RenderLayout(rightView string, rightTitle string, info Layou
 
 	// Content area.
 	contentH := d.Height - chromeRows
+
+	// Copilot session status: 2 extra footer rows when sessions are running.
+	copilotCount := len(d.CopilotPending)
+	copilotFooterRows := 0
+	if copilotCount > 0 {
+		copilotFooterRows = 2 // separator + status line
+	}
+
 	tree := d.Tree
 	tree.Width = treeW - 1
-	tree.Height = contentH - 2 // tree loses 2 rows for footer separator + branch
+	tree.Height = contentH - 2 - copilotFooterRows // tree loses rows for footer(s)
 	tree.CurrentFileIdx = d.CurrentFileIdx
 	treeContentLines := tree.View()
 	rightLines := strings.Split(rightView, "\n")
@@ -695,13 +704,36 @@ func (d DiffViewer) RenderLayout(rightView string, rightTitle string, info Layou
 	b.WriteString(separatorLine)
 	b.WriteString("\n")
 
+	// Footer row indices (counted from bottom of contentH).
+	branchRow := contentH - 1
+	branchSepRow := contentH - 2
+	copilotSepRow := branchSepRow - 2 // only used when copilotFooterRows > 0
+	copilotRow := branchSepRow - 1    // only used when copilotFooterRows > 0
+	yellow := lipgloss.NewStyle().Foreground(lipgloss.Yellow)
+
 	for i := 0; i < contentH; i++ {
-		// Left panel: tree content for most rows, footer for last 2.
+		// Left panel: tree content for most rows, footer rows at the bottom.
 		var leftPart string
-		if i == contentH-2 {
+		if copilotFooterRows > 0 && i == copilotSepRow {
+			// Separator above copilot status line.
+			leftPart = chrome.Render(strings.Repeat("─", treeW-1))
+		} else if copilotFooterRows > 0 && i == copilotRow {
+			// Copilot session status line.
+			label := " 1 Copilot session running"
+			if copilotCount > 1 {
+				label = fmt.Sprintf(" %d Copilot sessions running", copilotCount)
+			}
+			copilotText := yellow.Render(label)
+			textW := lipgloss.Width(copilotText)
+			pad := treeW - 1 - textW
+			if pad < 0 {
+				pad = 0
+			}
+			leftPart = copilotText + strings.Repeat(" ", pad)
+		} else if i == branchSepRow {
 			// Footer separator (only on tree side).
 			leftPart = chrome.Render(strings.Repeat("─", treeW-1))
-		} else if i == contentH-1 {
+		} else if i == branchRow {
 			// Branch name (left) + PR badge (right).
 			branchText := ""
 			if info.BranchName != "" {
@@ -958,7 +990,11 @@ func (d DiffViewer) AppendCopilotPending(filename string, fileComments []github.
 		}
 		body := d.CopilotReplyBuf[commentID]
 		if body == "" {
-			body = "Thinking" + dots
+			if tool := d.CopilotToolState[commentID]; tool != "" {
+				body = "Running " + tool + dots
+			} else {
+				body = "Thinking" + dots
+			}
 		} else {
 			body = body + dots
 		}

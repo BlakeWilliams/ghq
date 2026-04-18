@@ -15,6 +15,7 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/github/copilot-sdk/go v0.2.1
 	github.com/google/uuid v1.6.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -58,5 +59,4 @@ require (
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/term v0.37.0 // indirect
 	golang.org/x/text v0.31.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

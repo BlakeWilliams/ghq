@@ -24,6 +24,10 @@ type Config struct {
 	// commit-message generation prompt (e.g. "use emoji prefixes",
 	// "write in Spanish"). Leave empty for default behavior.
 	CommitPrompt string `yaml:"commit_prompt"`
+
+	// PRPrompt is additional user instructions appended to the base
+	// PR description generation prompt. Leave empty for default behavior.
+	PRPrompt string `yaml:"pull_request_prompt"`
 }
 
 // Default returns a Config with all defaults applied.
@@ -38,6 +42,7 @@ func Default() Config {
 type raw struct {
 	HelpMode     *bool   `yaml:"help_mode"`
 	CommitPrompt *string `yaml:"commit_prompt"`
+	PRPrompt *string `yaml:"pull_request_prompt"`
 }
 
 // Load reads the user config from the standard XDG location, falling back
@@ -70,6 +75,9 @@ func LoadFrom(path string) (Config, error) {
 	}
 	if r.CommitPrompt != nil {
 		cfg.CommitPrompt = *r.CommitPrompt
+	}
+	if r.PRPrompt != nil {
+		cfg.PRPrompt = *r.PRPrompt
 	}
 	return cfg, nil
 }

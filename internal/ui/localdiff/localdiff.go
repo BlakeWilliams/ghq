@@ -2972,12 +2972,15 @@ func (m *Model) removeDiffLines(fileIdx, start, end int) {
 			m.formatFile(m.dv.CurrentFileIdx)
 		}
 		m.rebuildContent()
+		m.dv.ScrollToDiffCursor()
 		return
 	}
 
 	m.dv.FileDiffs[fileIdx] = newLines
 
-	// Clamp cursor and skip hunk lines.
+	// Place cursor at the start of the removed range so it stays near the
+	// staged area rather than drifting to an unrelated line.
+	m.dv.DiffCursor = start
 	if m.dv.DiffCursor >= len(newLines) {
 		m.dv.DiffCursor = len(newLines) - 1
 	}
@@ -2991,6 +2994,7 @@ func (m *Model) removeDiffLines(fileIdx, start, end int) {
 	// Re-format to get correct rendered content and offsets.
 	m.formatFile(fileIdx)
 	m.rebuildContent()
+	m.dv.ScrollToDiffCursor()
 }
 
 // findHunkRange returns the start and end diff line indices for the hunk

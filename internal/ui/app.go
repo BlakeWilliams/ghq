@@ -636,18 +636,16 @@ func (m Model) openCommitFlow(action string) (tea.Model, tea.Cmd) {
 		commitAction = commit.ActionCommit
 	case "commit-push":
 		commitAction = commit.ActionCommitPush
-	case "commit-push-pr":
-		commitAction = commit.ActionCommitPushPR
 	case "push":
 		commitAction = commit.ActionPush
-	case "push-pr":
-		commitAction = commit.ActionPushPR
+	case "open-pr":
+		commitAction = commit.ActionOpenPR
 	default:
 		return m, nil
 	}
 
-	// Push-only actions don't need copilot.
-	if commitAction.NeedsCommit() {
+	// Actions that need AI generation need copilot.
+	if commitAction.NeedsCommit() || commitAction.NeedsPR() {
 		if m.chatClient == nil {
 			repoRoot := m.repoRoot
 			if repoRoot == "" {
@@ -668,7 +666,10 @@ func (m Model) openCommitFlow(action string) (tea.Model, tea.Cmd) {
 		modalW = 60
 	}
 
-	m.commitModel = commit.New(m.chatClient, commitAction, m.repoRoot, branch, "", modalW, m.height)
+	m.commitModel = commit.New(m.chatClient, commitAction, m.repoRoot, branch, commit.Config{
+		CommitPrompt: m.ctx.Config.CommitPrompt,
+		PRPrompt: m.ctx.Config.PRPrompt,
+	}, modalW, m.height)
 	m.mode = modeCommit
 	return m, m.commitModel.Init()
 }
@@ -676,19 +677,23 @@ func (m Model) openCommitFlow(action string) (tea.Model, tea.Cmd) {
 func (m Model) commitPickerItems() []picker.Item {
 	hasStaged := git.HasStagedChanges(m.repoRoot)
 	hasUnpushed := git.HasUnpushedCommits(m.repoRoot)
+	hasPR := git.HasOpenPR(m.repoRoot)
 
 	var items []picker.Item
 	if hasStaged {
 		items = append(items,
 			picker.Item{Label: "Commit", Description: "Commit staged changes", Value: "commit", Keywords: []string{"git"}},
 			picker.Item{Label: "Commit & Push", Description: "Commit and push to remote", Value: "commit-push", Keywords: []string{"git", "push"}},
-			picker.Item{Label: "Commit, Push & Open PR", Description: "Commit, push, and open a pull request", Value: "commit-push-pr", Keywords: []string{"git", "push", "pr", "pull request"}},
 		)
 	}
 	if hasUnpushed || hasStaged {
 		items = append(items,
 			picker.Item{Label: "Push", Description: "Push to remote", Value: "push", Keywords: []string{"git", "push"}},
-			picker.Item{Label: "Push & Open PR", Description: "Push and open a pull request", Value: "push-pr", Keywords: []string{"git", "push", "pr", "pull request"}},
+		)
+	}
+	if !hasPR {
+		items = append(items,
+			picker.Item{Label: "Open PR", Description: "Open a pull request", Value: "open-pr", Keywords: []string{"git", "pr", "pull request"}},
 		)
 	}
 	return items

@@ -64,3 +64,34 @@ func HasUnpushedCommits(dir string) bool {
 	}
 	return len(strings.TrimSpace(string(out))) > 0
 }
+
+// HasOpenPR returns true if the current branch already has an open PR.
+func HasOpenPR(dir string) bool {
+	cmd := exec.Command("gh", "pr", "view", "--json", "state", "-q", ".state")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "OPEN"
+}
+
+// BranchDiff returns the diff of the current branch vs the default branch.
+func BranchDiff(dir string) (string, error) {
+	// Find the merge base with the default branch.
+	base := exec.Command("gh", "repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name")
+	base.Dir = dir
+	baseOut, err := base.Output()
+	defaultBranch := strings.TrimSpace(string(baseOut))
+	if err != nil || defaultBranch == "" {
+		defaultBranch = "main"
+	}
+
+	cmd := exec.Command("git", "-C", dir, "diff", defaultBranch+"...HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git diff branch: %w", err)
+	}
+	return string(out), nil
+}
+

@@ -14,15 +14,14 @@ import (
 	"github.com/blakewilliams/gg/internal/review/agents"
 )
 
-// Action describes what to do after the commit.
+// Action describes what to do.
 type Action int
 
 const (
-	ActionCommit       Action = iota // commit only
-	ActionCommitPush                 // commit + push
-	ActionCommitPushPR               // commit + push + open PR
-	ActionPush                       // push only (no commit)
-	ActionPushPR                     // push + open PR (no commit)
+	ActionCommit     Action = iota // commit only
+	ActionCommitPush               // commit + push
+	ActionPush                     // push only
+	ActionOpenPR                   // open PR (no commit/push)
 )
 
 func (a Action) String() string {
@@ -31,19 +30,28 @@ func (a Action) String() string {
 		return "Commit"
 	case ActionCommitPush:
 		return "Commit & Push"
-	case ActionCommitPushPR:
-		return "Commit, Push & Open PR"
 	case ActionPush:
 		return "Push"
-	case ActionPushPR:
-		return "Push & Open PR"
+	case ActionOpenPR:
+		return "Open PR"
 	}
 	return ""
 }
 
 // NeedsCommit returns true if this action requires a commit message.
 func (a Action) NeedsCommit() bool {
-	return a == ActionCommit || a == ActionCommitPush || a == ActionCommitPushPR
+	return a == ActionCommit || a == ActionCommitPush
+}
+
+// NeedsPR returns true if this action opens a pull request.
+func (a Action) NeedsPR() bool {
+	return a == ActionOpenPR
+}
+
+// Config holds configurable prompts for the commit flow.
+type Config struct {
+	CommitPrompt string
+	PRPrompt string
 }
 
 // DoneMsg is sent when the commit flow completes successfully.
@@ -63,6 +71,9 @@ type editorDoneMsg struct {
 
 type tickMsg struct{}
 
+// pushDoneMsg signals commit+push completed, PR step next.
+type pushDoneMsg struct{}
+
 type execResultMsg struct {
 	err error
 }
@@ -71,21 +82,24 @@ type execResultMsg struct {
 type phase int
 
 const (
-	phaseGenerating phase = iota
-	phaseEditing
-	phaseExecuting
+	phaseGenerating    phase = iota // generating commit message
+	phaseEditing                    // editing commit message
+	phaseExecuting                  // running commit + push
+	phasePRGenerating               // generating PR description
+	phasePREditing                  // editing PR title/body
+	phasePRExecuting                // creating PR
 )
 
 // Model is the commit flow overlay.
 type Model struct {
-	action       Action
-	repoRoot     string
-	branch       string
-	client       *agents.Client
-	commitPrompt string
-	input        textarea.Model
-	width        int
-	height       int
+	action   Action
+	repoRoot string
+	branch   string
+	client   *agents.Client
+	cfg      Config
+	input    textarea.Model
+	width    int
+	height   int
 
 	// Flow state.
 	phase      phase
@@ -98,7 +112,7 @@ type Model struct {
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 // New creates a new commit flow model.
-func New(client *agents.Client, action Action, repoRoot, branch string, commitPrompt string, width, height int) Model {
+func New(client *agents.Client, action Action, repoRoot, branch string, cfg Config, width, height int) Model {
 	ta := textarea.New()
 	ta.SetWidth(width - 6)
 	ta.SetHeight(3)
@@ -108,16 +122,16 @@ func New(client *agents.Client, action Action, repoRoot, branch string, commitPr
 	ta.Placeholder = "Commit message..."
 
 	return Model{
-		action:       action,
-		repoRoot:     repoRoot,
-		branch:       branch,
-		client:       client,
-		commitPrompt: commitPrompt,
-		input:        ta,
-		width:        width,
-		height:       height,
-		message:      &strings.Builder{},
-		phase:        phaseGenerating,
+		action:   action,
+		repoRoot: repoRoot,
+		branch:   branch,
+		client:   client,
+		cfg:      cfg,
+		input:    ta,
+		width:    width,
+		height:   height,
+		message:  &strings.Builder{},
+		phase:    phaseGenerating,
 	}
 }
 
@@ -158,18 +172,30 @@ func (m *Model) resizeTextarea() {
 	m.input.SetHeight(lines)
 }
 
-// Title returns the overlay title based on the action.
+// Title returns the overlay title based on the current phase.
 func (m Model) Title() string {
-	return m.action.String()
+	switch m.phase {
+	case phasePRGenerating, phasePREditing, phasePRExecuting:
+		return "Open PR"
+	default:
+		return m.action.String()
+	}
 }
 
 // Init starts the commit flow.
 func (m Model) Init() tea.Cmd {
-	if !m.action.NeedsCommit() {
-		// Push-only actions skip straight to executing.
+	if m.action == ActionPush {
 		m.phase = phaseExecuting
 		return tea.Batch(
 			m.executeAction(""),
+			tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg { return tickMsg{} }),
+		)
+	}
+	if m.action == ActionOpenPR {
+		m.phase = phasePRGenerating
+		m.input.Placeholder = "PR description..."
+		return tea.Batch(
+			m.generatePRDescription(),
 			tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg { return tickMsg{} }),
 		)
 	}
@@ -198,7 +224,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
-		if m.phase == phaseExecuting || m.phase == phaseGenerating {
+		if m.phase == phaseExecuting || m.phase == phaseGenerating || m.phase == phasePRGenerating || m.phase == phasePRExecuting {
 			if msg.String() == "esc" {
 				return m, func() tea.Msg { return CancelMsg{} }
 			}
@@ -212,6 +238,14 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			body := strings.TrimSpace(m.input.Value())
 			if body == "" {
 				return m, nil
+			}
+			if m.phase == phasePREditing {
+				m.phase = phasePRExecuting
+				m.execErr = nil
+				return m, tea.Batch(
+					m.createPR(body),
+					tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg { return tickMsg{} }),
+				)
 			}
 			m.phase = phaseExecuting
 			m.execErr = nil
@@ -230,14 +264,14 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case tickMsg:
 		m.spinnerIdx = (m.spinnerIdx + 1) % len(spinnerFrames)
 
-		if m.phase == phaseGenerating {
+		if m.phase == phaseGenerating || m.phase == phasePRGenerating {
 			if m.client != nil {
 				for _, ev := range m.client.Drain() {
 					m.handleEvent(ev)
 				}
 			}
 
-			if m.phase == phaseGenerating {
+			if m.phase == phaseGenerating || m.phase == phasePRGenerating {
 				return m, tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg { return tickMsg{} })
 			}
 			// Generation finished — populate the textarea.
@@ -245,7 +279,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			m.resizeTextarea()
 			return m, m.input.Focus()
 		}
-		if m.phase == phaseExecuting {
+		if m.phase == phaseExecuting || m.phase == phasePRExecuting {
 			return m, tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg { return tickMsg{} })
 		}
 		return m, nil
@@ -259,7 +293,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 	case execResultMsg:
 		if msg.err != nil {
-			m.phase = phaseEditing
+			// Return to the appropriate editing phase on error.
+			if m.phase == phasePRExecuting {
+				m.phase = phasePREditing
+			} else {
+				m.phase = phaseEditing
+			}
 			m.execErr = msg.err
 			return m, m.input.Focus()
 		}
@@ -268,7 +307,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 	}
 
-	if m.phase == phaseEditing {
+	if m.phase == phaseEditing || m.phase == phasePREditing {
 		m.input, cmd = m.input.Update(msg)
 		m.resizeTextarea()
 		return m, cmd
@@ -283,9 +322,17 @@ func (m *Model) handleEvent(ev agents.AgentEvent) {
 			m.message.WriteString(p.Delta)
 		}
 	case agents.EventDone:
-		m.phase = phaseEditing
+		if m.phase == phasePRGenerating {
+			m.phase = phasePREditing
+		} else {
+			m.phase = phaseEditing
+		}
 	case agents.EventError:
-		m.phase = phaseEditing
+		if m.phase == phasePRGenerating {
+			m.phase = phasePREditing
+		} else {
+			m.phase = phaseEditing
+		}
 		if p, ok := ev.Payload.(agents.ErrorPayload); ok {
 			m.genErr = p.Err
 		}
@@ -309,8 +356,8 @@ func (m Model) generateMessage() tea.Cmd {
 	prompt.WriteString("Format: a concise title (max 72 chars) on the first line, then a blank line, then a description.\n")
 	prompt.WriteString("Use imperative mood. Do not wrap the description. Focus on why, not what.\n")
 	prompt.WriteString("Output ONLY the commit message, no explanation or markdown fences.\n\n")
-	if m.commitPrompt != "" {
-		prompt.WriteString("Additional instructions: " + m.commitPrompt + "\n\n")
+	if m.cfg.CommitPrompt != "" {
+		prompt.WriteString("Additional instructions: " + m.cfg.CommitPrompt + "\n\n")
 	}
 	if m.branch != "" {
 		prompt.WriteString("Branch: " + m.branch + "\n\n")
@@ -318,6 +365,41 @@ func (m Model) generateMessage() tea.Cmd {
 	prompt.WriteString("```diff\n" + diff + "\n```\n")
 
 	return m.client.SendPrompt("commit-msg", prompt.String())
+}
+
+func (m Model) generatePRDescription() tea.Cmd {
+	diff, err := git.BranchDiff(m.repoRoot)
+	if err != nil {
+		diff = ""
+	}
+	log, err := git.BranchLog(m.repoRoot)
+	if err != nil {
+		log = ""
+	}
+
+	if len(diff) > 30000 {
+		diff = diff[:30000] + "\n... (truncated)"
+	}
+
+	var prompt strings.Builder
+	prompt.WriteString("Generate a pull request title and description.\n")
+	prompt.WriteString("Format: a concise PR title on the first line, then a blank line, then a markdown description.\n")
+	prompt.WriteString("The description should explain what changed and why. Use markdown formatting.\n")
+	prompt.WriteString("Output ONLY the title and description, no explanation or outer markdown fences.\n\n")
+	if m.cfg.PRPrompt != "" {
+		prompt.WriteString("Additional instructions: " + m.cfg.PRPrompt + "\n\n")
+	}
+	if m.branch != "" {
+		prompt.WriteString("Branch: " + m.branch + "\n\n")
+	}
+	if log != "" {
+		prompt.WriteString("Commits:\n```\n" + log + "```\n\n")
+	}
+	if diff != "" {
+		prompt.WriteString("```diff\n" + diff + "\n```\n")
+	}
+
+	return m.client.SendPrompt("pr-description", prompt.String())
 }
 
 func (m Model) openEditor() tea.Cmd {
@@ -355,13 +437,6 @@ func (m Model) openEditor() tea.Cmd {
 
 func (m Model) executeAction(message string) tea.Cmd {
 	return func() tea.Msg {
-		title := message
-		body := ""
-		if idx := strings.Index(message, "\n"); idx >= 0 {
-			title = strings.TrimSpace(message[:idx])
-			body = strings.TrimSpace(message[idx+1:])
-		}
-
 		if m.action.NeedsCommit() {
 			if err := git.Commit(m.repoRoot, message); err != nil {
 				return execResultMsg{err: fmt.Errorf("commit failed: %w", err)}
@@ -375,14 +450,22 @@ func (m Model) executeAction(message string) tea.Cmd {
 			return execResultMsg{err: fmt.Errorf("push failed: %w", err)}
 		}
 
-		if m.action == ActionCommitPush || m.action == ActionPush {
-			return execResultMsg{}
+		return execResultMsg{}
+	}
+}
+
+func (m Model) createPR(content string) tea.Cmd {
+	return func() tea.Msg {
+		title := content
+		body := ""
+		if idx := strings.Index(content, "\n"); idx >= 0 {
+			title = strings.TrimSpace(content[:idx])
+			body = strings.TrimSpace(content[idx+1:])
 		}
 
 		if err := git.CreatePR(m.repoRoot, title, body); err != nil {
 			return execResultMsg{err: fmt.Errorf("PR creation failed: %w", err)}
 		}
-
 		return execResultMsg{}
 	}
 }
@@ -394,6 +477,8 @@ func (m Model) View() string {
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.BrightBlack)
 	errStyle := lipgloss.NewStyle().Foreground(lipgloss.Red)
 
+	maxLineW := m.width - 6
+
 	switch m.phase {
 	case phaseGenerating:
 		spinner := spinnerFrames[m.spinnerIdx]
@@ -402,17 +487,44 @@ func (m Model) View() string {
 		if m.message.Len() > 0 {
 			b.WriteString("\n")
 			for _, line := range strings.Split(m.message.String(), "\n") {
-				b.WriteString("  " + dimStyle.Render(line) + "\n")
+				rendered := dimStyle.Render(line)
+				if lipgloss.Width(rendered) > maxLineW {
+					rendered = lipgloss.NewStyle().MaxWidth(maxLineW).Render(rendered)
+				}
+				b.WriteString("  " + rendered + "\n")
+			}
+		}
+
+	case phasePRGenerating:
+		spinner := spinnerFrames[m.spinnerIdx]
+		b.WriteString("\n")
+		b.WriteString(dimStyle.Render("  "+spinner+" Generating PR description...") + "\n")
+		if m.message.Len() > 0 {
+			b.WriteString("\n")
+			for _, line := range strings.Split(m.message.String(), "\n") {
+				rendered := dimStyle.Render(line)
+				if lipgloss.Width(rendered) > maxLineW {
+					rendered = lipgloss.NewStyle().MaxWidth(maxLineW).Render(rendered)
+				}
+				b.WriteString("  " + rendered + "\n")
 			}
 		}
 
 	case phaseExecuting:
 		spinner := spinnerFrames[m.spinnerIdx]
 		b.WriteString("\n")
-		b.WriteString(m.input.View() + "\n\n")
+		if m.action.NeedsCommit() {
+			b.WriteString(m.input.View() + "\n\n")
+		}
 		b.WriteString(dimStyle.Render("  "+spinner+" "+m.action.String()+"...") + "\n")
 
-	case phaseEditing:
+	case phasePRExecuting:
+		spinner := spinnerFrames[m.spinnerIdx]
+		b.WriteString("\n")
+		b.WriteString(m.input.View() + "\n\n")
+		b.WriteString(dimStyle.Render("  "+spinner+" Creating PR...") + "\n")
+
+	case phaseEditing, phasePREditing:
 		b.WriteString("\n")
 		b.WriteString(m.input.View() + "\n\n")
 		if m.execErr != nil {

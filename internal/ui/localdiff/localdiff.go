@@ -2470,7 +2470,7 @@ func stripTrailingSpaces(s string) string {
 // cursorThreadInfo returns the path/line/side for the comment thread at the cursor.
 func (m Model) cursorThreadInfo() (path string, line int, side string, ok bool) {
 	idx := m.dv.CurrentFileIdx
-	if idx >= len(m.dv.FileDiffs) || m.dv.DiffCursor >= len(m.dv.FileDiffs[idx]) {
+	if idx < 0 || idx >= len(m.dv.FileDiffs) || m.dv.DiffCursor < 0 || m.dv.DiffCursor >= len(m.dv.FileDiffs[idx]) {
 		return
 	}
 	dl := m.dv.FileDiffs[idx][m.dv.DiffCursor]

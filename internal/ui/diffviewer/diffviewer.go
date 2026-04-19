@@ -979,6 +979,7 @@ func (d *DiffViewer) SpliceThreadWithHighlight(fileIdx int, side string, line in
 		for _, c := range threadComments {
 			if blocks, ok := blockLookup[c.ID]; ok && len(blocks) > 0 {
 				rendered = append(rendered, components.RenderComment{
+					ID:        c.ID,
 					Author:    c.User.Login,
 					CreatedAt: c.CreatedAt,
 					Blocks:    blocks,

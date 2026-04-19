@@ -607,3 +607,75 @@ func TestToolGroupRendering_CustomLabel(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// BuildRenderList: orphan / LEFT-on-context tests
+// ---------------------------------------------------------------------------
+
+func TestBuildRenderList_LeftCommentOnContextLine(t *testing.T) {
+	// A LEFT-side comment on a context line should be rendered.
+	patch := "@@ -1,3 +1,4 @@\n context line 1\n+added line 2\n context line 3\n context line 4"
+	diffLines := ParsePatchLines(patch)
+	colW := GutterColWidth(diffLines)
+	formatted := make([]DiffLine, len(diffLines))
+	copy(formatted, diffLines)
+	formatDiffLinesFromHL(formatted, nil, nil, "test.go", 80, testColors(), colW)
+
+	comments := []github.ReviewComment{
+		makeComment(1, "left side comment on context", "test.go", 1, "LEFT", nil),
+	}
+
+	list := BuildRenderList(formatted, comments)
+	positions := list.CommentPositions(testRC())
+	if len(positions) == 0 {
+		t.Fatal("LEFT comment on context line was not rendered")
+	}
+	if positions[0].Side != "LEFT" || positions[0].Line != 1 {
+		t.Errorf("unexpected position: side=%s line=%d", positions[0].Side, positions[0].Line)
+	}
+}
+
+func TestBuildRenderList_OrphanCommentNotRendered(t *testing.T) {
+	// Comment on line 50 — well outside the diff hunk (lines 1-4).
+	// Orphan comments should NOT be rendered.
+	patch := "@@ -1,3 +1,4 @@\n context line 1\n+added line 2\n context line 3\n context line 4"
+	diffLines := ParsePatchLines(patch)
+	colW := GutterColWidth(diffLines)
+	formatted := make([]DiffLine, len(diffLines))
+	copy(formatted, diffLines)
+	formatDiffLinesFromHL(formatted, nil, nil, "test.go", 80, testColors(), colW)
+
+	comments := []github.ReviewComment{
+		makeComment(1, "orphan comment far away", "test.go", 50, "RIGHT", nil),
+	}
+
+	list := BuildRenderList(formatted, comments)
+	positions := list.CommentPositions(testRC())
+	if len(positions) != 0 {
+		t.Fatalf("expected orphan comment to not be rendered, got %d positions", len(positions))
+	}
+}
+
+func TestBuildRenderList_InlineOnly(t *testing.T) {
+	// Only inline comments are rendered; orphans are skipped.
+	patch := "@@ -1,3 +1,4 @@\n context line 1\n+added line 2\n context line 3\n context line 4"
+	diffLines := ParsePatchLines(patch)
+	colW := GutterColWidth(diffLines)
+	formatted := make([]DiffLine, len(diffLines))
+	copy(formatted, diffLines)
+	formatDiffLinesFromHL(formatted, nil, nil, "test.go", 80, testColors(), colW)
+
+	comments := []github.ReviewComment{
+		makeComment(1, "inline on visible line", "test.go", 2, "RIGHT", nil),
+		makeComment(2, "orphan far away", "test.go", 100, "RIGHT", nil),
+	}
+
+	list := BuildRenderList(formatted, comments)
+	positions := list.CommentPositions(testRC())
+	if len(positions) != 1 {
+		t.Fatalf("expected 1 comment position (inline only), got %d", len(positions))
+	}
+	if positions[0].Line != 2 {
+		t.Errorf("expected line 2, got %d", positions[0].Line)
+	}
+}

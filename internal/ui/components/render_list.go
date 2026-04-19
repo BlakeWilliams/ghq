@@ -22,6 +22,7 @@ type RenderContext struct {
 // Both github.ReviewComment (API) and comments.LocalComment (local) convert
 // to this type at the rendering boundary.
 type RenderComment struct {
+	ID        int
 	Author    string
 	CreatedAt time.Time
 	Blocks    []comments.ContentBlock
@@ -31,6 +32,7 @@ type RenderComment struct {
 // RenderComment by wrapping the body as a single TextBlock.
 func ReviewCommentToRender(c github.ReviewComment) RenderComment {
 	return RenderComment{
+		ID:        c.ID,
 		Author:    c.User.Login,
 		CreatedAt: c.CreatedAt,
 		Blocks:    []comments.ContentBlock{comments.TextBlock{Text: c.Body}},
@@ -375,8 +377,6 @@ func (f *FileRenderList) ThreadEndOffset(side string, line int, rc RenderContext
 	return -1
 }
 
-// CommentPositions returns a CommentPosition for each individual comment
-// across all threads, with correct visual-line offsets.
 func (f *FileRenderList) CommentPositions(rc RenderContext) []CommentPosition {
 	var positions []CommentPosition
 	offset := 0
@@ -387,11 +387,17 @@ func (f *FileRenderList) CommentPositions(rc RenderContext) []CommentPosition {
 			// Thread layout: blank line, then per-comment blocks.
 			lineInThread := 1 // skip blank line above
 			for ci, cl := range ct.commentLines {
+				commentID := 0
+				if ci < len(ct.Comments) {
+					commentID = ct.Comments[ci].ID
+				}
 				positions = append(positions, CommentPosition{
-					Line:   ct.Line,
-					Side:   ct.Side,
-					Idx:    ci,
-					Offset: offset + lineInThread,
+					Line:      ct.Line,
+					Side:      ct.Side,
+					Idx:       ci,
+					Offset:    offset + lineInThread,
+					Height:    cl,
+					CommentID: commentID,
 				})
 				lineInThread += cl
 			}

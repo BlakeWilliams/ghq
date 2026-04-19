@@ -122,6 +122,7 @@ type Model struct {
 
 	// Comments.
 	commentStore *comments.CommentStore
+	readState    *comments.ReadState
 	replyToID    string
 
 	// File watcher.
@@ -177,6 +178,7 @@ func New(ctx *uictx.Context, repoRoot string, width, height int) Model {
 		mode:          active.Mode,
 		watcher:       w,
 		commentStore:  cs,
+		readState:     comments.LoadReadState(repoRoot),
 		savedFilename: commentViewState.Filename,
 		savedLineNo:   commentViewState.LineNo,
 		savedSide:     commentViewState.Side,
@@ -691,6 +693,8 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 		m.dv.VP, cmd = m.dv.VP.Update(msg)
 		if m.dv.VP.YOffset() != prevOffset && m.dv.CurrentFileIdx >= 0 {
 			m.dv.SyncDiffCursorToViewport()
+			m.markVisibleCommentsRead()
+			m.updateCommentCounts()
 		}
 		return m, cmd
 	}
@@ -818,6 +822,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 		return m, cmd, true
 	case "j", "down", "k", "up", "J", "shift+down", "K", "shift+up":
 		if m.dv.HandleNavKey(msg.String()) == diffviewer.KeyHandled {
+			m.markVisibleCommentsRead()
+			m.updateCommentCounts()
 			return m, nil, true
 		}
 	case "enter":
@@ -1028,10 +1034,135 @@ func (m Model) renderLayout(rightView string) string {
 
 func (m *Model) rebuildContent() {
 	m.dv.RebuildContent(m.buildOverviewContent, m.buildFileContent)
+	m.updateCommentCounts()
 }
 
 func (m *Model) rebuildContentIfChanged() {
 	m.dv.RebuildContentIfChanged(m.buildOverviewContent, m.buildFileContent)
+	m.updateCommentCounts()
+}
+
+// updateCommentCounts recomputes per-file comment counts and unread counts
+// and wires them to the file tree for badge rendering.
+// Only counts threads that land on a visible diff line (not orphans).
+func (m *Model) updateCommentCounts() {
+	n := len(m.dv.Files)
+	if n == 0 {
+		m.dv.Tree.FileCommentCounts = nil
+		m.dv.Tree.FileUnreadCounts = nil
+		return
+	}
+	counts := make([]int, n)
+	unread := make([]int, n)
+	for i, f := range m.dv.Files {
+		fileComments := m.dv.CommentsForFile(f.Filename)
+
+		// Build set of visible (side, line) keys from diff lines.
+		type slKey struct {
+			side string
+			line int
+		}
+		visible := map[slKey]bool{}
+		if i < len(m.dv.FileDiffs) {
+			for _, dl := range m.dv.FileDiffs[i] {
+				switch dl.Type {
+				case components.LineDel:
+					visible[slKey{"LEFT", dl.OldLineNo}] = true
+				case components.LineContext:
+					visible[slKey{"RIGHT", dl.NewLineNo}] = true
+					visible[slKey{"LEFT", dl.OldLineNo}] = true
+				default:
+					visible[slKey{"RIGHT", dl.NewLineNo}] = true
+				}
+			}
+		}
+
+		// Group comments by thread root to find newest per thread.
+		type threadInfo struct {
+			rootID int
+			side   string
+			line   int
+			newest time.Time
+		}
+		threads := map[int]*threadInfo{} // keyed by root ID
+
+		// First pass: find roots.
+		for _, c := range fileComments {
+			if c.InReplyToID != nil {
+				continue
+			}
+			line := 0
+			if c.Line != nil {
+				line = *c.Line
+			}
+			threads[c.ID] = &threadInfo{rootID: c.ID, side: c.Side, line: line, newest: c.UpdatedAt}
+		}
+
+		// Second pass: update newest time from replies.
+		for _, c := range fileComments {
+			if c.InReplyToID == nil {
+				continue
+			}
+			if t, ok := threads[*c.InReplyToID]; ok {
+				if c.UpdatedAt.After(t.newest) {
+					t.newest = c.UpdatedAt
+				}
+			}
+		}
+
+		// Only count threads on visible diff lines.
+		for _, t := range threads {
+			if !visible[slKey{t.side, t.line}] {
+				continue
+			}
+			counts[i]++
+			if m.readState != nil && m.readState.IsThreadUnreadInt(t.rootID, t.newest) {
+				unread[i]++
+			}
+		}
+	}
+	m.dv.Tree.FileCommentCounts = counts
+	m.dv.Tree.FileUnreadCounts = unread
+}
+
+// markVisibleCommentsRead checks which comment threads are visible in the viewport
+// and marks them as read in the read state (keyed by thread root ID).
+func (m *Model) markVisibleCommentsRead() {
+	if m.readState == nil || !m.dv.VPReady {
+		return
+	}
+	idx := m.dv.CurrentFileIdx
+	if idx < 0 || idx >= len(m.dv.FileCommentPositions) {
+		return
+	}
+	vpTop := m.dv.VP.YOffset()
+	vpBot := vpTop + m.dv.ViewportHeight()
+
+	// Collect visible thread roots. CommentPositions are grouped by thread;
+	// the first entry (Idx==0) in each thread is the root.
+	visibleRoots := map[int]bool{}
+	var currentRoot int
+	for _, cp := range m.dv.FileCommentPositions[idx] {
+		if cp.CommentID == 0 {
+			continue
+		}
+		if cp.Idx == 0 {
+			currentRoot = cp.CommentID
+		}
+		cpBot := cp.Offset + cp.Height
+		if cpBot > vpTop && cp.Offset < vpBot {
+			visibleRoots[currentRoot] = true
+		}
+	}
+
+	dirty := false
+	for rootID := range visibleRoots {
+		m.readState.MarkReadInt(rootID)
+		dirty = true
+	}
+	if dirty {
+		m.readState.Save()
+	}
 }
 
 func (m Model) buildOverviewContent(w int) string {
@@ -1360,6 +1491,8 @@ func (m *Model) selectTreeEntry() tea.Cmd {
 	}
 	m.rebuildContent()
 	m.dv.ScrollToDiffCursor()
+	m.markVisibleCommentsRead()
+	m.updateCommentCounts()
 	m.saveViewState()
 	return nil
 }
@@ -1626,6 +1759,16 @@ func (m Model) handleCommentKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 
 		m.commentStore.Add(comment)
 		m.dv.SelectionAnchor = -1
+
+		// Mark thread as read so the badge doesn't go yellow while copilot runs.
+		if m.readState != nil {
+			rootID := comment.ID
+			if m.replyToID != "" {
+				rootID = m.replyToID
+			}
+			m.readState.MarkReadInt(comments.IDToInt(rootID))
+			m.readState.Save()
+		}
 
 		// Set copilot pending state BEFORE rebuild so "Thinking..." shows immediately.
 		if m.dv.Agent != nil {

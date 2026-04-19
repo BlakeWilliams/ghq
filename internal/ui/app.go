@@ -286,23 +286,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mode = modeNormal
 		return m, nil
 
-	default:
-		if m.mode == modeCommand {
-			var cmd tea.Cmd
-			m.commandBar, cmd = m.commandBar.Update(msg)
-			return m, cmd
-		}
-		if m.mode == modePicker {
-			var cmd tea.Cmd
-			m.picker, cmd = m.picker.Update(msg)
-			return m, cmd
-		}
-		if m.mode == modeCopilotChat {
-			var cmd tea.Cmd
-			m.copilotChat, cmd = m.copilotChat.Update(msg)
-			return m, cmd
-		}
-
 	case userLoadedMsg:
 		m.ctx.Username = msg.User.Login
 		return m, m.activeView.Init()

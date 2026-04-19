@@ -662,7 +662,7 @@ func (m Model) openCommitFlow(action string) (tea.Model, tea.Cmd) {
 		modalH = 12
 	}
 
-	m.commitModel = commit.New(m.chatClient, commitAction, m.repoRoot, branch, modalW, modalH)
+	m.commitModel = commit.New(m.chatClient, commitAction, m.repoRoot, branch, m.ctx.Config.CommitPrompt, modalW, modalH)
 	m.mode = modeCommit
 	return m, m.commitModel.Init()
 }

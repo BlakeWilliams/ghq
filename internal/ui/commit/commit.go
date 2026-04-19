@@ -50,13 +50,14 @@ type execResultMsg struct {
 
 // Model is the commit flow overlay.
 type Model struct {
-	action    Action
-	repoRoot  string
-	branch    string
-	client    *agents.Client
-	input     textarea.Model
-	width     int
-	height    int
+	action       Action
+	repoRoot     string
+	branch       string
+	client       *agents.Client
+	commitPrompt string
+	input        textarea.Model
+	width        int
+	height       int
 
 	// Streaming state.
 	streaming  bool
@@ -74,7 +75,7 @@ type Model struct {
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 // New creates a new commit flow model.
-func New(client *agents.Client, action Action, repoRoot, branch string, width, height int) Model {
+func New(client *agents.Client, action Action, repoRoot, branch string, commitPrompt string, width, height int) Model {
 	ta := textarea.New()
 	ta.SetWidth(width - 4)
 	ta.SetHeight(height/2 - 2)
@@ -82,13 +83,14 @@ func New(client *agents.Client, action Action, repoRoot, branch string, width, h
 	ta.Placeholder = "Commit message..."
 
 	return Model{
-		action:   action,
-		repoRoot: repoRoot,
-		branch:   branch,
-		client:   client,
-		input:    ta,
-		width:    width,
-		height:   height,
+		action:       action,
+		repoRoot:     repoRoot,
+		branch:       branch,
+		client:       client,
+		commitPrompt: commitPrompt,
+		input:        ta,
+		width:        width,
+		height:       height,
 	}
 }
 
@@ -201,9 +203,13 @@ func (m Model) generateMessage() tea.Cmd {
 
 	var prompt strings.Builder
 	prompt.WriteString("Generate a git commit message for the following staged changes. ")
-	prompt.WriteString("Use conventional commit format. Write a concise title (max 72 chars) on the first line. ")
+	prompt.WriteString("Use imperative mood. Write a concise title (max 72 chars) on the first line. ")
 	prompt.WriteString("If the changes warrant it, add a blank line followed by a brief body. ")
-	prompt.WriteString("Output ONLY the commit message, no explanation or markdown fences.\n\n")
+	prompt.WriteString("Focus on the high-level why and how of the change, not file-by-file summaries. ")
+	prompt.WriteString("Output ONLY the commit message, no explanation.\n\n")
+	if m.commitPrompt != "" {
+		prompt.WriteString("Additional instructions: " + m.commitPrompt + "\n\n")
+	}
 	if m.branch != "" {
 		prompt.WriteString("Branch: " + m.branch + "\n\n")
 	}

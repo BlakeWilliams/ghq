@@ -956,9 +956,14 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 			m.updateThreadHighlight()
 			m.dv.StartSearch()
 			return m, nil, true
+		case "m":
+			m.dv.ThreadCursor = 0
+			m.updateThreadHighlight()
+			// Fall through to the normal "m" handler below.
+		default:
+			// Let unrecognized keys (ctrl+p, :, ?, etc.) fall through to global shortcuts.
+			return m, nil, false
 		}
-		// Let unrecognized keys (ctrl+p, :, ?, etc.) fall through to global shortcuts.
-		return m, nil, false
 	}
 
 	// Clear selection on esc.
@@ -1904,6 +1909,9 @@ func (m Model) prevNonHunkLine(fromIdx int) int {
 		return -1
 	}
 	lines := m.dv.FileDiffs[idx]
+	if fromIdx > len(lines) {
+		fromIdx = len(lines)
+	}
 	for i := fromIdx - 1; i >= 0; i-- {
 		if lines[i].Type != components.LineHunk {
 			return i

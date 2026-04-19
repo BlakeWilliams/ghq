@@ -19,6 +19,11 @@ type Config struct {
 	// contextual help row at the bottom of the file viewer, etc.).
 	// Defaults to true.
 	HelpMode bool `yaml:"help_mode"`
+
+	// CommitPrompt is additional user instructions appended to the base
+	// commit-message generation prompt (e.g. "use emoji prefixes",
+	// "write in Spanish"). Leave empty for default behavior.
+	CommitPrompt string `yaml:"commit_prompt"`
 }
 
 // Default returns a Config with all defaults applied.
@@ -31,7 +36,8 @@ func Default() Config {
 // raw mirrors Config but uses pointers so we can detect "field not set"
 // vs "field set to zero value" and apply defaults appropriately.
 type raw struct {
-	HelpMode *bool `yaml:"help_mode"`
+	HelpMode     *bool   `yaml:"help_mode"`
+	CommitPrompt *string `yaml:"commit_prompt"`
 }
 
 // Load reads the user config from the standard XDG location, falling back
@@ -61,6 +67,9 @@ func LoadFrom(path string) (Config, error) {
 	}
 	if r.HelpMode != nil {
 		cfg.HelpMode = *r.HelpMode
+	}
+	if r.CommitPrompt != nil {
+		cfg.CommitPrompt = *r.CommitPrompt
 	}
 	return cfg, nil
 }

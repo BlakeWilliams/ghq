@@ -4,6 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLoadFromMissingFile(t *testing.T) {
@@ -83,4 +86,21 @@ func TestDirFallsBackToHomeDotConfig(t *testing.T) {
 	if dir != want {
 		t.Errorf("Dir() = %q, want %q", dir, want)
 	}
+}
+
+func TestLoadFromCommitPrompt(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	err := os.WriteFile(path, []byte("commit_prompt: \"always use emoji prefixes\"\n"), 0o644)
+	require.NoError(t, err)
+
+	cfg, err := LoadFrom(path)
+	require.NoError(t, err)
+	assert.Equal(t, "always use emoji prefixes", cfg.CommitPrompt)
+}
+
+func TestLoadFromCommitPromptDefault(t *testing.T) {
+	cfg, err := LoadFrom(filepath.Join(t.TempDir(), "nope.yaml"))
+	require.NoError(t, err)
+	assert.Equal(t, "", cfg.CommitPrompt)
 }

@@ -419,6 +419,12 @@ func (d DiffViewer) OverlayDiffCursor(view string) string {
 		return d.overlaySelectionRange(view)
 	}
 
+	// When navigating within a thread, highlight the selected comment instead
+	// of the diff cursor line.
+	if d.ThreadCursor > 0 {
+		return d.overlayCommentHighlight(view)
+	}
+
 	vLine := d.CursorViewportLine()
 	if vLine < 0 {
 		return view
@@ -526,6 +532,66 @@ func (d DiffViewer) ApplySelectionHighlight(line string, dl components.DiffLine)
 	}
 
 	return prefix + inner + suffix
+}
+
+// overlayCommentHighlight applies cursor-style background highlighting to the
+// selected comment when in thread navigation mode (ThreadCursor > 0).
+func (d DiffViewer) overlayCommentHighlight(view string) string {
+	idx := d.CurrentFileIdx
+	if idx < 0 || idx >= len(d.FileDiffs) || d.DiffCursor >= len(d.FileDiffs[idx]) {
+		return view
+	}
+	if idx >= len(d.FileRenderLists) || d.FileRenderLists[idx] == nil {
+		return view
+	}
+
+	// Determine thread side/line from the diff cursor.
+	dl := d.FileDiffs[idx][d.DiffCursor]
+	var side string
+	var line int
+	if dl.Type == components.LineDel {
+		side, line = "LEFT", dl.OldLineNo
+	} else {
+		side, line = "RIGHT", dl.NewLineNo
+	}
+
+	// Get the selected comment's rendered offset and height.
+	rc := d.renderContext(d.FileDiffs[idx])
+	commentIdx := d.ThreadCursor - 1 // ThreadCursor is 1-based
+	absOffset, height := d.FileRenderLists[idx].ThreadCommentOffset(side, line, commentIdx, rc)
+	if absOffset < 0 || height <= 0 {
+		return view
+	}
+
+	// Pick the cursor bg based on the parent line type.
+	colors := d.Ctx.DiffColors
+	lt := d.ThreadParentLineType(idx, side, line)
+	var selBg string
+	switch lt {
+	case components.LineAdd:
+		selBg = colors.SelectedAddBg
+	case components.LineDel:
+		selBg = colors.SelectedDelBg
+	default:
+		selBg = colors.SelectedCtxBg
+	}
+	if selBg == "" {
+		return view
+	}
+
+	vpTop := d.VP.YOffset()
+	lines := strings.Split(view, "\n")
+
+	for i := 0; i < height; i++ {
+		abs := absOffset + i
+		rel := abs - vpTop
+		if rel < 0 || rel >= len(lines) {
+			continue
+		}
+		lines[rel] = replaceBackground(lines[rel], colors, selBg)
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 // replaceBackground swaps diff bg colors for selected bg in an ANSI string.

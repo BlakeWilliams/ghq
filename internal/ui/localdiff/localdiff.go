@@ -1377,14 +1377,14 @@ func (m *Model) formatFile(index int) {
 	}
 }
 
-// updateThreadHighlight re-renders just the thread at the cursor with updated highlighting.
-// Much faster than formatFile for large files since it's O(thread) not O(file).
+// updateThreadHighlight re-renders just the thread at the cursor to refresh it.
+// The visual highlight is handled by OverlayDiffCursor, not by the thread render.
 func (m *Model) updateThreadHighlight() {
 	_, line, side, ok := m.cursorThreadInfo()
 	if !ok {
 		return
 	}
-	m.dv.SpliceThreadWithHighlight(m.dv.CurrentFileIdx, side, line, m.dv.ThreadCursor > 0, m.dv.ThreadCursor)
+	m.dv.SpliceThreadWithHighlight(m.dv.CurrentFileIdx, side, line, false, 0)
 }
 
 // commentStoreAdapter adapts a CommentStore + GitHub review comments to the CommentSource interface.

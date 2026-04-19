@@ -2,6 +2,8 @@
 
 Interactive local diffs. Review, stage, and polish your changes with agents. Think `git add -p`, but with super powers.
 
+![demo](assets/demo.gif)
+
 - Interactive staging with a live diff view
 - Ask Copilot questions about your code as you review
 - Make finishing touches to your changes inline

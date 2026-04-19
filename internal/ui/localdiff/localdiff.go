@@ -902,6 +902,11 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 			m.dv.Tree.MoveSelection(1)
 			cmd := m.selectTreeEntry()
 			return m, cmd, true
+		case "/":
+			m.dv.ThreadCursor = 0
+			m.updateThreadHighlight()
+			m.dv.StartSearch()
+			return m, nil, true
 		}
 		// Let unrecognized keys (ctrl+p, :, ?, etc.) fall through to global shortcuts.
 		return m, nil, false

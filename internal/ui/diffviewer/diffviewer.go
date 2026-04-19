@@ -1613,18 +1613,8 @@ func (d *DiffViewer) HandleSearchKey(key string, text string) KeyResult {
 	switch key {
 	case "enter":
 		d.Searching = false
-		if d.SearchQuery != "" {
-			re, err := regexp.Compile("(?i)" + d.SearchQuery)
-			if err != nil {
-				// Invalid regex — clear search.
-				d.SearchPattern = nil
-				d.SearchMatches = nil
-				d.SearchMatchIdx = -1
-				return KeyHandled
-			}
-			d.SearchPattern = re
-			d.RunSearch()
-			d.SearchNext()
+		if d.SearchQuery == "" {
+			d.ClearSearch()
 		}
 		return KeyHandled
 	case "esc":
@@ -1634,14 +1624,45 @@ func (d *DiffViewer) HandleSearchKey(key string, text string) KeyResult {
 		if len(d.SearchQuery) > 0 {
 			d.SearchQuery = d.SearchQuery[:len(d.SearchQuery)-1]
 		}
+		d.updateIncrementalSearch()
 		return KeyHandled
 	default:
 		// Append typed text.
 		if text != "" {
 			d.SearchQuery += text
 		}
+		d.updateIncrementalSearch()
 		return KeyHandled
 	}
+}
+
+// updateIncrementalSearch recompiles the pattern from SearchQuery and
+// re-runs the search so highlights update live as the user types.
+func (d *DiffViewer) updateIncrementalSearch() {
+	if d.SearchQuery == "" {
+		d.SearchPattern = nil
+		d.SearchMatches = nil
+		d.SearchMatchIdx = -1
+		return
+	}
+	// Smart case: case-insensitive unless query contains uppercase.
+	prefix := "(?i)"
+	for _, r := range d.SearchQuery {
+		if r >= 'A' && r <= 'Z' {
+			prefix = ""
+			break
+		}
+	}
+	re, err := regexp.Compile(prefix + d.SearchQuery)
+	if err != nil {
+		// Invalid regex mid-typing — clear matches but keep query.
+		d.SearchPattern = nil
+		d.SearchMatches = nil
+		d.SearchMatchIdx = -1
+		return
+	}
+	d.SearchPattern = re
+	d.RunSearch()
 }
 
 // StartSearch opens the search popup.

@@ -2,8 +2,10 @@ package components
 
 import (
 	"strings"
+	"time"
 
 	"github.com/blakewilliams/ghq/internal/github"
+	"github.com/blakewilliams/ghq/internal/review/comments"
 	"github.com/blakewilliams/ghq/internal/ui/styles"
 )
 
@@ -13,6 +15,35 @@ type RenderContext struct {
 	Colors     styles.DiffColors
 	ColW       int // gutter column width
 	RenderBody func(body string, width int, bg string) string
+	AnimFrame  int // animation frame (0-3) for running tool spinners
+}
+
+// RenderComment is the view-model for rendering a single comment in a thread.
+// Both github.ReviewComment (API) and comments.LocalComment (local) convert
+// to this type at the rendering boundary.
+type RenderComment struct {
+	Author    string
+	CreatedAt time.Time
+	Blocks    []comments.ContentBlock
+}
+
+// ReviewCommentToRender converts a GitHub API ReviewComment into a
+// RenderComment by wrapping the body as a single TextBlock.
+func ReviewCommentToRender(c github.ReviewComment) RenderComment {
+	return RenderComment{
+		Author:    c.User.Login,
+		CreatedAt: c.CreatedAt,
+		Blocks:    []comments.ContentBlock{comments.TextBlock{Text: c.Body}},
+	}
+}
+
+// ReviewCommentsToRender converts a slice of GitHub API ReviewComments.
+func ReviewCommentsToRender(cs []github.ReviewComment) []RenderComment {
+	out := make([]RenderComment, len(cs))
+	for i, c := range cs {
+		out[i] = ReviewCommentToRender(c)
+	}
+	return out
 }
 
 // Renderable is a single element in the rendered diff output.
@@ -98,19 +129,21 @@ type CommentThreadItem struct {
 	diffLineIdx    int
 	Side           string
 	Line           int
-	Comments       []github.ReviewComment
+	Comments       []RenderComment
 	Highlighted    bool
 	HlIdx          int // 0 = whole thread, >0 = specific comment (1-based)
 	ParentLineType LineType
+	OpenBottom     bool // when true, omit bottom border + trailing blank (reply box connects below)
 
 	// Cached render state
-	content      string
-	lineCount    int
-	commentLines []int // per-comment rendered line count (from renderCommentThread)
-	width        int
+	content        string
+	lineCount      int
+	commentLines   []int // per-comment rendered line count (from renderCommentThread)
+	width          int
+	cachedOpenBtm  bool
 }
 
-func NewCommentThreadItem(diffLineIdx int, side string, line int, comments []github.ReviewComment, parentLT LineType) *CommentThreadItem {
+func NewCommentThreadItem(diffLineIdx int, side string, line int, comments []RenderComment, parentLT LineType) *CommentThreadItem {
 	return &CommentThreadItem{
 		diffLineIdx:    diffLineIdx,
 		Side:           side,
@@ -121,7 +154,7 @@ func NewCommentThreadItem(diffLineIdx int, side string, line int, comments []git
 }
 
 func (c *CommentThreadItem) Render(rc RenderContext) string {
-	if c.width == rc.Width && c.content != "" {
+	if c.width == rc.Width && c.content != "" && c.cachedOpenBtm == c.OpenBottom {
 		return c.content
 	}
 	c.render(rc)
@@ -129,7 +162,7 @@ func (c *CommentThreadItem) Render(rc RenderContext) string {
 }
 
 func (c *CommentThreadItem) RenderedLineCount(rc RenderContext) int {
-	if c.width == rc.Width && c.content != "" {
+	if c.width == rc.Width && c.content != "" && c.cachedOpenBtm == c.OpenBottom {
 		return c.lineCount
 	}
 	c.render(rc)
@@ -153,18 +186,20 @@ func (c *CommentThreadItem) render(rc RenderContext) {
 		c.lineCount = 0
 		c.commentLines = nil
 		c.width = rc.Width
+		c.cachedOpenBtm = c.OpenBottom
 		return
 	}
 	gutterW := TotalGutterWidth(rc.ColW)
 	result := renderCommentThread(
 		c.Comments, rc.Width, c.ParentLineType, rc.Colors,
 		c.Highlighted, c.HlIdx, rc.Colors.HighlightBorderFg,
-		rc.RenderBody, gutterW,
+		rc.RenderBody, gutterW, rc.AnimFrame, c.OpenBottom,
 	)
 	c.content = result.content
 	c.lineCount = strings.Count(strings.TrimRight(result.content, "\n"), "\n") + 1
 	c.commentLines = result.commentLines
 	c.width = rc.Width
+	c.cachedOpenBtm = c.OpenBottom
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +212,12 @@ type FileRenderList struct {
 	// Cached full output — invalidated on any mutation.
 	cachedStr string
 	dirty     bool
+}
+
+// MarkDirty forces the next String() call to re-render all items.
+func (f *FileRenderList) MarkDirty() {
+	f.dirty = true
+	f.cachedStr = ""
 }
 
 // String returns the full rendered content for this file.
@@ -315,6 +356,20 @@ func (f *FileRenderList) FindThread(side string, line int) int {
 		s, l := item.ThreadKey()
 		if s == side && l == line {
 			return i
+		}
+	}
+	return -1
+}
+
+// ThreadEndOffset returns the rendered line offset immediately after the
+// comment thread at (side, line). Returns -1 if the thread is not found.
+func (f *FileRenderList) ThreadEndOffset(side string, line int, rc RenderContext) int {
+	offset := 0
+	for _, item := range f.Items {
+		offset += item.RenderedLineCount(rc)
+		s, l := item.ThreadKey()
+		if s == side && l == line {
+			return offset
 		}
 	}
 	return -1

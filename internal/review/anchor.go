@@ -1,4 +1,4 @@
-package comments
+package review
 
 import (
 	"strings"

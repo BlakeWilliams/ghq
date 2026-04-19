@@ -2,26 +2,29 @@ package comments
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"time"
 
-	"github.com/blakewilliams/ghq/internal/github"
 	"github.com/blakewilliams/ghq/internal/cache/persist"
+	"github.com/blakewilliams/ghq/internal/github"
 )
 
 // LocalComment represents a comment on a local diff line.
 type LocalComment struct {
-	ID          string    `json:"id"`
-	Body        string    `json:"body"`
-	Path        string    `json:"path"`
-	Line        int       `json:"line"`
-	Side        string    `json:"side"` // "LEFT" or "RIGHT"
-	StartLine   int       `json:"start_line,omitempty"`
-	StartSide   string    `json:"start_side,omitempty"`
-	InReplyToID string    `json:"in_reply_to_id,omitempty"`
-	Author      string    `json:"author"` // "you" or "copilot"
-	Resolved    bool      `json:"resolved"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          string         `json:"id"`
+	Body        string         `json:"body"`
+	Path        string         `json:"path"`
+	Line        int            `json:"line"`
+	Side        string         `json:"side"` // "LEFT" or "RIGHT"
+	StartLine   int            `json:"start_line,omitempty"`
+	StartSide   string         `json:"start_side,omitempty"`
+	InReplyToID string         `json:"in_reply_to_id,omitempty"`
+	Author      string         `json:"author"` // "you" or "copilot"
+	Resolved    bool           `json:"resolved"`
+	CreatedAt   time.Time      `json:"created_at"`
+	Blocks      []ContentBlock `json:"-"` // custom marshal via RawBlocks
+	RawBlocks   json.RawMessage `json:"blocks,omitempty"`
 }
 
 // ToReviewComment converts a LocalComment to a github.ReviewComment
@@ -76,6 +79,9 @@ func LoadComments(repoPath string) *CommentStore {
 	store := &CommentStore{RepoPath: repoPath}
 	persist.Load(cacheFilename(repoPath), store)
 	store.RepoPath = repoPath
+	for i := range store.Comments {
+		store.Comments[i].hydrateBlocks()
+	}
 	return store
 }
 
@@ -84,13 +90,16 @@ func (s *CommentStore) Save() error {
 	return persist.Save(cacheFilename(s.RepoPath), s)
 }
 
-// Add adds a comment and persists.
+// Add adds a comment and persists. If the comment has Blocks, they are
+// serialized to RawBlocks and Body is derived for backward compatibility.
 func (s *CommentStore) Add(c LocalComment) {
+	c.prepareForSave()
 	s.Comments = append(s.Comments, c)
 	s.Save()
 }
 
-// ForFile returns non-resolved comments for a given file path.
+// ForFile returns non-resolved comments for a given file path as ReviewComments.
+// Note: blocks are lost in this conversion — use ForFileLocal for block-aware rendering.
 func (s *CommentStore) ForFile(path string) []github.ReviewComment {
 	// First pass: find resolved root IDs.
 	resolved := map[string]bool{}
@@ -110,6 +119,29 @@ func (s *CommentStore) ForFile(path string) []github.ReviewComment {
 			continue
 		}
 		result = append(result, c.ToReviewComment())
+	}
+	return result
+}
+
+// ForFileLocal returns non-resolved LocalComments for a given file path,
+// preserving block data for rendering.
+func (s *CommentStore) ForFileLocal(path string) []LocalComment {
+	resolved := map[string]bool{}
+	for _, c := range s.Comments {
+		if c.Resolved && c.InReplyToID == "" {
+			resolved[c.ID] = true
+		}
+	}
+
+	var result []LocalComment
+	for _, c := range s.Comments {
+		if c.Path != path {
+			continue
+		}
+		if c.Resolved || resolved[c.InReplyToID] {
+			continue
+		}
+		result = append(result, c)
 	}
 	return result
 }
@@ -142,4 +174,26 @@ func (s *CommentStore) Resolve(rootID string, resolved bool) {
 		}
 	}
 	s.Save()
+}
+
+// prepareForSave serializes Blocks to RawBlocks and populates Body from
+// text blocks for backward compatibility.
+func (c *LocalComment) prepareForSave() {
+	if len(c.Blocks) > 0 {
+		raw, err := MarshalBlocksJSON(c.Blocks)
+		if err == nil {
+			c.RawBlocks = raw
+		}
+		c.Body = BodyFromBlocks(c.Blocks)
+	}
+}
+
+// hydrateBlocks deserializes RawBlocks into Blocks after loading from disk.
+func (c *LocalComment) hydrateBlocks() {
+	if len(c.RawBlocks) > 0 {
+		blocks, err := UnmarshalBlocksJSON(c.RawBlocks)
+		if err == nil {
+			c.Blocks = blocks
+		}
+	}
 }

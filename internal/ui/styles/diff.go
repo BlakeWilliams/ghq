@@ -37,8 +37,12 @@ type DiffColors struct {
 	// suitable for syntax highlighting on both normal and tinted backgrounds.
 	ChromaStyle *chroma.Style
 
+	// AddBgColor / DelBgColor as color.Color for use with lipgloss styles.
+	AddBgColor color.Color
+	DelBgColor color.Color
+
 	// Palette colors for use with lipgloss (resolved from terminal).
-	PaletteGreen   color.Color
+	PaletteGreen color.Color
 	PaletteRed     color.Color
 	PaletteYellow  color.Color
 	PaletteCyan    color.Color
@@ -104,12 +108,14 @@ func ComputeDiffColors(p terminal.Palette) DiffColors {
 	if green != nil {
 		addBg := blendColor(green, bg, 0.08)
 		colors.AddBg = colorToBgCode(addBg)
+		colors.AddBgColor = addBg
 		colors.AddFg = colorToFgCode(ensureContrast(green, addBg))
 		// Selected add: stronger green tint.
 		selectedAddBg := blendColor(green, bg, 0.25)
 		colors.SelectedAddBg = colorToBgCode(selectedAddBg)
 	} else {
 		colors.AddBg = "\033[48;5;22m"
+		colors.AddBgColor = color.RGBA{R: 0, G: 95, B: 0, A: 255}
 		colors.AddFg = "\033[32m"
 		colors.SelectedAddBg = "\033[48;5;28m"
 	}
@@ -117,12 +123,14 @@ func ComputeDiffColors(p terminal.Palette) DiffColors {
 	if red != nil {
 		delBg := blendColor(red, bg, 0.08)
 		colors.DelBg = colorToBgCode(delBg)
+		colors.DelBgColor = delBg
 		colors.DelFg = colorToFgCode(ensureContrast(red, delBg))
 		// Selected del: stronger red tint.
 		selectedDelBg := blendColor(red, bg, 0.25)
 		colors.SelectedDelBg = colorToBgCode(selectedDelBg)
 	} else {
 		colors.DelBg = "\033[48;5;52m"
+		colors.DelBgColor = color.RGBA{R: 95, G: 0, B: 0, A: 255}
 		colors.DelFg = "\033[31m"
 		colors.SelectedDelBg = "\033[48;5;88m"
 	}

@@ -5,7 +5,6 @@ import (
 	"image/color"
 	"path"
 	"strings"
-	"time"
 
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
@@ -13,8 +12,8 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/blakewilliams/ghq/internal/github"
+	"github.com/blakewilliams/ghq/internal/review/agents"
 	"github.com/blakewilliams/ghq/internal/review/comments"
-	"github.com/blakewilliams/ghq/internal/review/copilot"
 	"github.com/blakewilliams/ghq/internal/ui/components"
 	"github.com/blakewilliams/ghq/internal/ui/styles"
 	"github.com/blakewilliams/ghq/internal/ui/uictx"
@@ -79,11 +78,8 @@ type DiffViewer struct {
 	CommentStartSide string
 
 	// Copilot state
-	Copilot          *copilot.Client
-	CopilotReplyBuf  map[string]string            // commentID -> accumulated reply content
-	CopilotPending   map[string]CopilotPendingInfo // commentID -> pending info
-	CopilotDots      int                           // shared animation frame (0-3)
-	CopilotToolState map[string]string             // commentID -> active tool name ("" if none)
+	Agent        *agents.Client
+	CopilotState CopilotState
 
 	// Comment source — set by outer model. Returns base comments for a file
 	// (without copilot pending, which DiffViewer appends itself).
@@ -108,6 +104,15 @@ type DiffViewer struct {
 // to return comments from its backing store (local CommentStore, GitHub API, etc).
 type CommentSource interface {
 	CommentsForFile(filename string) []github.ReviewComment
+}
+
+// BlockSource is an optional extension of CommentSource that provides
+// content blocks for comments that have them (e.g. copilot replies with
+// tool calls). The returned map is keyed by ReviewComment.ID.
+// If a CommentSource also implements BlockSource, blocks are preserved
+// during rendering instead of being lost in the ReviewComment conversion.
+type BlockSource interface {
+	BlocksForFile(filename string) map[int][]comments.ContentBlock
 }
 
 // --- Layout helpers ---
@@ -658,7 +663,7 @@ func (d DiffViewer) RenderLayout(rightView string, rightTitle string, info Layou
 	contentH := d.Height - chromeRows
 
 	// Copilot session status: 2 extra footer rows when sessions are running.
-	copilotCount := len(d.CopilotPending)
+	copilotCount := len(d.CopilotState.Pending)
 	copilotFooterRows := 0
 	if copilotCount > 0 {
 		copilotFooterRows = 2 // separator + status line
@@ -821,17 +826,28 @@ func (d *DiffViewer) renderContext(diffLines []components.DiffLine) components.R
 		Colors:     d.Ctx.DiffColors,
 		ColW:       colW,
 		RenderBody: d.RenderBody,
+		AnimFrame:  d.CopilotState.Dots,
 	}
 }
 
-// CommentsForFile gathers comments for a file: base comments from the
-// CommentSource + copilot pending comments.
+// CommentsForFile gathers base comments for a file from the CommentSource.
+// Does not include pending copilot comments — use CopilotState.PendingRenderComments
+// for those (they carry block data that can't be expressed as ReviewComment).
 func (d DiffViewer) CommentsForFile(filename string) []github.ReviewComment {
 	var comments []github.ReviewComment
 	if d.Comments != nil {
 		comments = d.Comments.CommentsForFile(filename)
 	}
-	return d.AppendCopilotPending(filename, comments)
+	return comments
+}
+
+// blocksForFile returns a block lookup for the current file if the CommentSource
+// supports it, or nil otherwise.
+func (d DiffViewer) blocksForFile(filename string) map[int][]comments.ContentBlock {
+	if bs, ok := d.Comments.(BlockSource); ok {
+		return bs.BlocksForFile(filename)
+	}
+	return nil
 }
 
 // syncFromRenderList derives RenderedFiles, FileDiffOffsets, and FileCommentPositions
@@ -857,14 +873,21 @@ func (d *DiffViewer) FormatFile(index int) {
 		return
 	}
 	hl := d.HighlightedFiles[index]
-	fileComments := d.CommentsForFile(d.Files[index].Filename)
+	filename := d.Files[index].Filename
+	fileComments := d.CommentsForFile(filename)
 
 	var opts components.DiffFormatOptions
 	if d.RenderBody != nil {
 		opts.RenderBody = d.RenderBody
 	}
+	if pending := d.CopilotState.PendingRenderComments(filename); len(pending) > 0 {
+		opts.PendingComments = pending
+	}
+	// Use block-aware threading if the source supports it.
+	if blockLookup := d.blocksForFile(filename); blockLookup != nil {
+		opts.ThreadedComments = components.BuildThreadedRenderComments(fileComments, blockLookup)
+	}
 
-	// Prepare highlighted diff lines.
 	diffLines := make([]components.DiffLine, len(hl.DiffLines))
 	copy(diffLines, hl.DiffLines)
 	colW := components.GutterColWidth(diffLines)
@@ -946,12 +969,38 @@ func (d *DiffViewer) SpliceThreadWithHighlight(fileIdx int, side string, line in
 		return
 	}
 
-	fileComments := d.CommentsForFile(d.Files[fileIdx].Filename)
+	filename := d.Files[fileIdx].Filename
+	fileComments := d.CommentsForFile(filename)
 	threadComments := components.CommentsForThread(fileComments, side, line)
 
-	replacement := components.NewCommentThreadItem(old.DiffIdx(), side, line, threadComments, old.ParentLineType)
+	// Convert to RenderComments, preserving blocks if available.
+	var rendered []components.RenderComment
+	if blockLookup := d.blocksForFile(filename); blockLookup != nil {
+		for _, c := range threadComments {
+			if blocks, ok := blockLookup[c.ID]; ok && len(blocks) > 0 {
+				rendered = append(rendered, components.RenderComment{
+					Author:    c.User.Login,
+					CreatedAt: c.CreatedAt,
+					Blocks:    blocks,
+				})
+			} else {
+				rendered = append(rendered, components.ReviewCommentToRender(c))
+			}
+		}
+	} else {
+		rendered = components.ReviewCommentsToRender(threadComments)
+	}
+
+	// Append any pending copilot comments for this thread.
+	if pending := d.CopilotState.PendingRenderComments(filename); len(pending) > 0 {
+		pk := components.CommentKey{Side: side, Line: line}
+		rendered = append(rendered, pending[pk]...)
+	}
+
+	replacement := components.NewCommentThreadItem(old.DiffIdx(), side, line, rendered, old.ParentLineType)
 	replacement.Highlighted = highlighted
 	replacement.HlIdx = hlIdx
+	replacement.OpenBottom = old.OpenBottom
 	list.ReplaceThread(side, line, replacement)
 
 	rc := d.renderContext(d.FileDiffs[fileIdx])
@@ -986,49 +1035,12 @@ func (d *DiffViewer) InsertThread(fileIdx int, diffLineIdx int, side string, lin
 		lt = d.FileDiffs[fileIdx][diffLineIdx].Type
 	}
 
-	item := components.NewCommentThreadItem(diffLineIdx, side, line, comments, lt)
+	item := components.NewCommentThreadItem(diffLineIdx, side, line, components.ReviewCommentsToRender(comments), lt)
 	d.FileRenderLists[fileIdx].InsertAfterDiffLine(diffLineIdx, item)
 
 	rc := d.renderContext(d.FileDiffs[fileIdx])
 	d.syncFromRenderList(fileIdx, rc)
 	return true
-}
-
-// AppendCopilotPending appends all pending Copilot "Thinking..." comments
-// for the given file to the comment slice.
-func (d DiffViewer) AppendCopilotPending(filename string, fileComments []github.ReviewComment) []github.ReviewComment {
-	dots := strings.Repeat(".", d.CopilotDots+1)
-	for commentID, info := range d.CopilotPending {
-		if info.Path != filename {
-			continue
-		}
-		body := d.CopilotReplyBuf[commentID]
-		if body == "" {
-			if tool := d.CopilotToolState[commentID]; tool != "" {
-				body = "Running " + tool + dots
-			} else {
-				body = "Thinking" + dots
-			}
-		} else {
-			body = body + dots
-		}
-		line := info.Line
-		replyToInt := comments.IDToInt(commentID)
-		pending := github.ReviewComment{
-			ID:           0,
-			Body:         body,
-			Path:         filename,
-			Line:         &line,
-			OriginalLine: &line,
-			Side:         info.Side,
-			InReplyToID:  &replyToInt,
-			User:         github.User{Login: "copilot"},
-			CreatedAt:    time.Now(),
-			UpdatedAt:    time.Now(),
-		}
-		fileComments = append(fileComments, pending)
-	}
-	return fileComments
 }
 
 // FileIndexForPath returns the index of the file with the given path, or -1.
@@ -1039,6 +1051,60 @@ func (d DiffViewer) FileIndexForPath(path string) int {
 		}
 	}
 	return -1
+}
+
+// ThreadEndOffset returns the rendered line offset immediately after the
+// comment thread at (side, line) for the given file index.
+// Returns -1 if the thread or render list is not found.
+func (d *DiffViewer) ThreadEndOffset(fileIdx int, side string, line int) int {
+	if fileIdx < 0 || fileIdx >= len(d.FileRenderLists) || d.FileRenderLists[fileIdx] == nil {
+		return -1
+	}
+	if fileIdx >= len(d.FileDiffs) {
+		return -1
+	}
+	rc := d.renderContext(d.FileDiffs[fileIdx])
+	return d.FileRenderLists[fileIdx].ThreadEndOffset(side, line, rc)
+}
+
+// SetThreadOpenBottom sets or clears the OpenBottom flag on a thread, invalidates
+// it, and re-syncs the render list so that RenderedFiles and offsets are updated.
+func (d *DiffViewer) SetThreadOpenBottom(fileIdx int, side string, line int, open bool) {
+	if fileIdx < 0 || fileIdx >= len(d.FileRenderLists) || d.FileRenderLists[fileIdx] == nil {
+		return
+	}
+	list := d.FileRenderLists[fileIdx]
+	ti := list.FindThread(side, line)
+	if ti < 0 {
+		return
+	}
+	ct, ok := list.Items[ti].(*components.CommentThreadItem)
+	if !ok {
+		return
+	}
+	ct.OpenBottom = open
+	ct.Invalidate()
+	list.MarkDirty()
+	rc := d.renderContext(d.FileDiffs[fileIdx])
+	d.syncFromRenderList(fileIdx, rc)
+}
+
+// ThreadParentLineType returns the ParentLineType of the comment thread at (side, line)
+// for the given file. Returns LineContext if the thread is not found.
+func (d *DiffViewer) ThreadParentLineType(fileIdx int, side string, line int) components.LineType {
+	if fileIdx < 0 || fileIdx >= len(d.FileRenderLists) || d.FileRenderLists[fileIdx] == nil {
+		return components.LineContext
+	}
+	list := d.FileRenderLists[fileIdx]
+	ti := list.FindThread(side, line)
+	if ti < 0 {
+		return components.LineContext
+	}
+	ct, ok := list.Items[ti].(*components.CommentThreadItem)
+	if !ok {
+		return components.LineContext
+	}
+	return ct.ParentLineType
 }
 
 // --- Viewport helpers ---
@@ -1097,40 +1163,6 @@ func (d *DiffViewer) InitFileSlices(n int) {
 	d.FileDiffOffsets = make([][]int, n)
 	d.FileCommentPositions = make([][]components.CommentPosition, n)
 	d.FileRenderLists = make([]*components.FileRenderList, n)
-}
-
-// --- Copilot helpers ---
-
-// SetCopilotPending marks a comment as awaiting Copilot reply.
-func (d *DiffViewer) SetCopilotPending(commentID, path string, line int, side string) {
-	if d.CopilotPending == nil {
-		d.CopilotPending = make(map[string]CopilotPendingInfo)
-	}
-	d.CopilotPending[commentID] = CopilotPendingInfo{Path: path, Line: line, Side: side}
-}
-
-// ClearCopilotPending removes a single pending Copilot session.
-func (d *DiffViewer) ClearCopilotPending(commentID string) {
-	delete(d.CopilotPending, commentID)
-}
-
-// HasCopilotPending returns true if there are any pending Copilot sessions.
-func (d DiffViewer) HasCopilotPending() bool {
-	return len(d.CopilotPending) > 0
-}
-
-// IsCopilotPending returns true if the given comment is pending.
-func (d DiffViewer) IsCopilotPending(commentID string) bool {
-	_, ok := d.CopilotPending[commentID]
-	return ok
-}
-
-// CopilotPendingPath returns the path of a pending Copilot session, or "".
-func (d DiffViewer) CopilotPendingPath(commentID string) string {
-	if info, ok := d.CopilotPending[commentID]; ok {
-		return info.Path
-	}
-	return ""
 }
 
 // --- Spinner helpers ---
@@ -1312,11 +1344,16 @@ func (d *DiffViewer) HandleNavKey(key string) KeyResult {
 		if d.WaitingG {
 			d.WaitingG = false
 			if d.Tree.Focused {
-				d.Tree.MoveCursorBy(-2 - len(d.Tree.Entries))
+				d.Tree.Cursor = 0
 			} else {
 				d.VP.GotoTop()
 				if d.CurrentFileIdx >= 0 && d.HasDiffLines() {
-					d.SyncDiffCursorToViewport()
+					d.DiffCursor = 0
+					// Skip past hunk header if line 0 is one.
+					lines := d.FileDiffs[d.CurrentFileIdx]
+					for d.DiffCursor < len(lines) && lines[d.DiffCursor].Type == components.LineHunk {
+						d.DiffCursor++
+					}
 				}
 			}
 			return KeyHandled

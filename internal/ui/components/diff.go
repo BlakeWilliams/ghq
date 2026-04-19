@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/blakewilliams/ghq/internal/github"
+	"github.com/blakewilliams/ghq/internal/review/comments"
 	"github.com/blakewilliams/ghq/internal/ui/styles"
 )
 
@@ -141,10 +142,20 @@ type DiffFormatOptions struct {
 	// 0 = highlight the whole thread, >0 = highlight only that comment.
 	HighlightCommentIndex int
 	// RenderBody, if set, is called to render comment bodies (e.g. markdown).
-	// It receives the body text, the wrap width, and the raw ANSI bg code
-	// for the diff line the comment sits on. The returned string should use
-	// reset+bg instead of bare \033[0m so the diff background survives.
 	RenderBody func(body string, width int, bg string) string
+	// PendingComments are extra RenderComments (e.g. streaming copilot replies)
+	// keyed by side+line. They are appended after base comments.
+	PendingComments map[CommentKey][]RenderComment
+	// ThreadedComments, if set, provides pre-built RenderComments keyed by
+	// side+line. When set, these replace the ReviewComment→RenderComment
+	// conversion for base comments (preserving blocks from local comments).
+	ThreadedComments map[CommentKey][]RenderComment
+}
+
+// CommentKey identifies a comment thread position.
+type CommentKey struct {
+	Side string
+	Line int
 }
 
 // BuildRenderList creates a FileRenderList from a highlighted diff.
@@ -170,8 +181,23 @@ func BuildRenderList(diffLines []DiffLine, comments []github.ReviewComment, opts
 			ck = commentKey{Side: "RIGHT", Line: dl.NewLineNo}
 		}
 		if ck.Line > 0 {
-			if threadComments, ok := commentsByLine[ck]; ok {
-				ct := NewCommentThreadItem(i, ck.Side, ck.Line, threadComments, dl.Type)
+			pk := CommentKey{Side: ck.Side, Line: ck.Line}
+
+			// Get base thread comments: prefer pre-built RenderComments if available.
+			var rendered []RenderComment
+			if opt.ThreadedComments != nil {
+				rendered = opt.ThreadedComments[pk]
+			} else if threadComments, ok := commentsByLine[ck]; ok {
+				rendered = ReviewCommentsToRender(threadComments)
+			}
+
+			// Append pending (streaming) comments.
+			if pending := opt.PendingComments[pk]; len(pending) > 0 {
+				rendered = append(rendered, pending...)
+			}
+
+			if len(rendered) > 0 {
+				ct := NewCommentThreadItem(i, ck.Side, ck.Line, rendered, dl.Type)
 				ct.Highlighted = ck.Line == opt.HighlightThreadLine && ck.Side == opt.HighlightThreadSide
 				if ct.Highlighted {
 					ct.HlIdx = opt.HighlightCommentIndex
@@ -189,6 +215,32 @@ func CommentsForThread(allComments []github.ReviewComment, side string, line int
 	threads := buildCommentThreads(allComments)
 	key := commentKey{Side: side, Line: line}
 	return threads[key]
+}
+
+// BuildThreadedRenderComments threads ReviewComments by position and converts
+// to RenderComments. If blockLookup is non-nil, comments whose ID appears in
+// the map get their blocks from the lookup (preserving tool calls, etc.)
+// instead of wrapping Body as a single TextBlock.
+func BuildThreadedRenderComments(comments []github.ReviewComment, blockLookup map[int][]comments.ContentBlock) map[CommentKey][]RenderComment {
+	threads := buildCommentThreads(comments)
+	result := make(map[CommentKey][]RenderComment, len(threads))
+	for ck, threadComments := range threads {
+		pk := CommentKey{Side: ck.Side, Line: ck.Line}
+		rendered := make([]RenderComment, len(threadComments))
+		for i, c := range threadComments {
+			if blocks, ok := blockLookup[c.ID]; ok && len(blocks) > 0 {
+				rendered[i] = RenderComment{
+					Author:    c.User.Login,
+					CreatedAt: c.CreatedAt,
+					Blocks:    blocks,
+				}
+			} else {
+				rendered[i] = ReviewCommentToRender(c)
+			}
+		}
+		result[pk] = rendered
+	}
+	return result
 }
 
 // ParsePatchLines parses a unified diff patch into structured DiffLines.
@@ -444,7 +496,7 @@ func wrapRenderedLine(rendered string, targetW int, lt LineType, colors styles.D
 			break
 		}
 		// Continuation gutter: spaces + wrap arrow (↩) in dim.
-		wrapArrow := "\033[2m↩\033[0m" + bgCode + " "
+		wrapArrow := "\033[2m↪\033[0m" + bgCode + " "
 		contGutter := bgCode + strings.Repeat(" ", gutterW-2) + wrapArrow
 		chunk := ansi.Truncate(remaining, codeW, "")
 		chunkW := lipgloss.Width(chunk)
@@ -661,8 +713,8 @@ func buildCommentThreads(comments []github.ReviewComment) map[commentKey][]githu
 // dimCode is the raw ANSI escape for BrightBlack foreground (used for comment borders).
 const dimCode = "\033[90m"
 
-// bgForLineType returns the raw ANSI bg code for the given diff line type.
-func bgForLineType(lt LineType, colors styles.DiffColors) string {
+// BgForLineType returns the ANSI background escape code for a diff line type.
+func BgForLineType(lt LineType, colors styles.DiffColors) string {
 	switch lt {
 	case LineAdd:
 		return colors.AddBg
@@ -673,9 +725,23 @@ func bgForLineType(lt LineType, colors styles.DiffColors) string {
 	}
 }
 
+func bgForLineType(lt LineType, colors styles.DiffColors) string {
+	return BgForLineType(lt, colors)
+}
+
+// CommentGutter renders an empty gutter matching the diff line style.
+func CommentGutter(bg string, gutterW int) string {
+	return commentGutter(bg, gutterW)
+}
+
 // commentGutter renders an empty gutter matching the diff line style.
 func commentGutter(bg string, gutterW int) string {
 	return bg + strings.Repeat(" ", gutterW)
+}
+
+// PadWithBg pads a string to targetWidth and appends a reset escape.
+func PadWithBg(s string, targetWidth int, bgCode string) string {
+	return padWithBg(s, targetWidth, bgCode)
 }
 
 // emptyLine renders a full-width blank line with the given bg.
@@ -693,9 +759,177 @@ type commentThreadResult struct {
 	commentLines []int // rendered line count for each comment (header + body)
 }
 
+// renderBodyLines renders text body lines inside comment borders.
+// Returns the number of lines written.
+func renderBodyLines(b *strings.Builder, body, gutterStr, borderFg, bg string, innerW, width int) int {
+	count := 0
+	for _, line := range strings.Split(body, "\n") {
+		wrappedLines := wrapCommentLine(line, innerW)
+		for _, wl := range wrappedLines {
+			visW := lipgloss.Width(wl)
+			pad := innerW - visW
+			if pad < 0 {
+				pad = 0
+			}
+			content := gutterStr + borderFg + "│" + "\033[0m" + bg +
+				" " + wl + "\033[0m" + bg + strings.Repeat(" ", pad) + " " +
+				borderFg + "│" + "\033[0m"
+			b.WriteString(padWithBg(content, width, bg))
+			b.WriteString("\n")
+			count++
+		}
+	}
+	return count
+}
+
+// renderToolGroup renders a tool call group as a rounded-border sub-box.
+// Border color reflects aggregate status: green (all done), yellow (some running), red (any failed).
+// If a label is set (from report_intent), it shows in yellow on the top border.
+func renderToolGroup(b *strings.Builder, group comments.ToolGroupBlock, gutterStr, borderFg, bg string, innerW, width int, colors styles.DiffColors, animFrame int) int {
+	if len(group.Tools) == 0 {
+		return 0
+	}
+
+	// Status-based border color for the tool sub-box.
+	var toolBorderFg string
+	switch group.ToolGroupStatus() {
+	case "running":
+		toolBorderFg = "\033[33m" // yellow
+	case "failed":
+		toolBorderFg = "\033[31m" // red
+	default:
+		toolBorderFg = "\033[32m" // green
+	}
+	dimFg := "\033[90m"    // bright black for tool names/args
+	yellowFg := "\033[33m" // yellow for label text
+
+	// The tool sub-box sits inside the comment borders.
+	subBoxW := innerW - 2 // 1 char padding on each side within the comment
+	if subBoxW < 10 {
+		subBoxW = 10
+	}
+	subInnerW := subBoxW - 4 // "│ " + " │" inside the sub-box
+	if subInnerW < 6 {
+		subInnerW = 6
+	}
+
+	count := 0
+
+	// Top border: ╭ Label ───╮  or  ╭──────────╮  (no label)
+	var subTop string
+	if group.Label != "" {
+		label := " " + group.Label + " "
+		labelW := lipgloss.Width(label)
+		topFill := subBoxW - 2 - labelW
+		if topFill < 0 {
+			topFill = 0
+		}
+		subTop = toolBorderFg + "╭" + yellowFg + label + toolBorderFg + strings.Repeat("─", topFill) + "╮" + "\033[0m"
+	} else {
+		topFill := subBoxW - 2
+		if topFill < 0 {
+			topFill = 0
+		}
+		subTop = toolBorderFg + "╭" + strings.Repeat("─", topFill) + "╮" + "\033[0m"
+	}
+	subTopW := lipgloss.Width(subTop)
+	subTopPad := innerW - subTopW
+	if subTopPad < 0 {
+		subTopPad = 0
+	}
+	line := gutterStr + borderFg + "│" + "\033[0m" + bg +
+		" " + subTop + bg + strings.Repeat(" ", subTopPad) + " " +
+		borderFg + "│" + "\033[0m"
+	b.WriteString(padWithBg(line, width, bg))
+	b.WriteString("\n")
+	count++
+
+	// Tool rows: │ ● name  args │
+	spinFrames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	for _, tc := range group.Tools {
+		var marker string
+		switch tc.Status {
+		case "done":
+			marker = "\033[32m●" + bg // green, then restore bg
+		case "failed":
+			marker = "\033[31m✕" + bg // red
+		default:
+			marker = "\033[33m" + spinFrames[animFrame%len(spinFrames)] + bg // yellow spinner
+		}
+
+		name := tc.Name
+		nameW := lipgloss.Width(name)
+
+		// Budget: "● " (2) + name + " args" — fits in subInnerW.
+		maxNameW := subInnerW - 2
+		if nameW > maxNameW {
+			name = name[:maxNameW-1] + "…"
+			nameW = maxNameW
+		}
+
+		// Build row content: marker + name, then optionally truncated args.
+		var rowContent string
+		if tc.Arguments != "" {
+			argsSpace := subInnerW - 2 - nameW - 1 // -2 for "● ", -1 for space before args
+			if argsSpace > 3 {
+				args := tc.Arguments
+				argsW := lipgloss.Width(args)
+				if argsW > argsSpace {
+					args = args[:argsSpace-1] + "…"
+				}
+				rowContent = marker + " " + dimFg + name + bg + " " + dimFg + args + bg
+			} else {
+				rowContent = marker + " " + dimFg + name + bg
+			}
+		} else {
+			rowContent = marker + " " + dimFg + name + bg
+		}
+
+		rowVisW := lipgloss.Width(rowContent)
+		rowPad := subInnerW - rowVisW
+		if rowPad < 0 {
+			rowPad = 0
+		}
+		subRow := toolBorderFg + "│" + bg +
+			" " + rowContent + strings.Repeat(" ", rowPad) + " " +
+			toolBorderFg + "│" + "\033[0m"
+		subRowW := lipgloss.Width(subRow)
+		outerPad := innerW - subRowW
+		if outerPad < 0 {
+			outerPad = 0
+		}
+		line := gutterStr + borderFg + "│" + "\033[0m" + bg +
+			" " + subRow + bg + strings.Repeat(" ", outerPad) + " " +
+			borderFg + "│" + "\033[0m"
+		b.WriteString(padWithBg(line, width, bg))
+		b.WriteString("\n")
+		count++
+	}
+
+	// Bottom border: ╰───────╯
+	botFill := subBoxW - 2
+	if botFill < 0 {
+		botFill = 0
+	}
+	subBot := toolBorderFg + "╰" + strings.Repeat("─", botFill) + "╯" + "\033[0m"
+	subBotW := lipgloss.Width(subBot)
+	subBotPad := innerW - subBotW
+	if subBotPad < 0 {
+		subBotPad = 0
+	}
+	line = gutterStr + borderFg + "│" + "\033[0m" + bg +
+		" " + subBot + bg + strings.Repeat(" ", subBotPad) + " " +
+		borderFg + "│" + "\033[0m"
+	b.WriteString(padWithBg(line, width, bg))
+	b.WriteString("\n")
+	count++
+
+	return count
+}
+
 // renderCommentThread renders a thread of review comments.
 // hlIdx: 0 = highlight whole thread (or none if !highlighted), >0 = highlight only that 1-indexed comment.
-func renderCommentThread(comments []github.ReviewComment, width int, lt LineType, colors styles.DiffColors, highlighted bool, hlIdx int, hlBorderFg string, renderBody func(string, int, string) string, gutterW int) commentThreadResult {
+func renderCommentThread(rcComments []RenderComment, width int, lt LineType, colors styles.DiffColors, highlighted bool, hlIdx int, hlBorderFg string, renderBody func(string, int, string) string, gutterW int, animFrame int, openBottom bool) commentThreadResult {
 	bg := bgForLineType(lt, colors)
 	defaultBorderFg := colors.BorderFg
 	// If highlighting the whole thread (hlIdx==0), use highlight color for all borders.
@@ -718,7 +952,7 @@ func renderCommentThread(comments []github.ReviewComment, width int, lt LineType
 	b.WriteString(emptyLine(bg, width))
 	lineCount++
 
-	for i, c := range comments {
+	for i, c := range rcComments {
 		commentStart := lineCount
 
 		// Per-comment border color: highlight only the selected comment.
@@ -731,7 +965,7 @@ func renderCommentThread(comments []github.ReviewComment, width int, lt LineType
 			}
 		}
 
-		authorStyled := ColoredAuthor(c.User.Login)
+		authorStyled := ColoredAuthor(c.Author)
 		author := " " + authorStyled + "\033[0m" + bg + " "
 		ageStr := relativeTime(c.CreatedAt)
 		age := dimCode + ageStr + "\033[0m" + bg + " "
@@ -764,52 +998,52 @@ func renderCommentThread(comments []github.ReviewComment, width int, lt LineType
 		if innerW < 10 {
 			innerW = 10
 		}
-		body := c.Body
-		if renderBody != nil {
-			body = renderBody(body, innerW, bg)
+
+		// Render each content block.
+		blocks := c.Blocks
+		if len(blocks) == 0 {
+			blocks = []comments.ContentBlock{comments.TextBlock{}}
 		}
-		for _, line := range strings.Split(body, "\n") {
-			// Wrap long lines instead of truncating.
-			wrappedLines := wrapCommentLine(line, innerW)
-			for _, wl := range wrappedLines {
-				visW := lipgloss.Width(wl)
-				pad := innerW - visW
-				if pad < 0 {
-					pad = 0
+		for _, block := range blocks {
+			switch blk := block.(type) {
+			case comments.TextBlock:
+				body := blk.Text
+				if renderBody != nil && body != "" {
+					body = renderBody(body, innerW, bg)
 				}
-				content := gutterStr + borderFg + "│" + "\033[0m" + bg +
-					" " + wl + "\033[0m" + bg + strings.Repeat(" ", pad) + " " +
-					borderFg + "│" + "\033[0m"
-				b.WriteString(padWithBg(content, width, bg))
-				b.WriteString("\n")
-				lineCount++
+				lineCount += renderBodyLines(&b, body, gutterStr, borderFg, bg, innerW, width)
+
+			case comments.ToolGroupBlock:
+				lineCount += renderToolGroup(&b, blk, gutterStr, borderFg, bg, innerW, width, colors, animFrame)
 			}
 		}
 
 		commentLineCounts = append(commentLineCounts, lineCount-commentStart)
 	}
 
-	// Bottom border uses the last comment's border color.
-	lastBorderFg := threadBorderFg
-	if highlighted && hlIdx > 0 {
-		if len(comments) == hlIdx {
-			lastBorderFg = hlBorderFg
-		} else {
-			lastBorderFg = defaultBorderFg
+	// Bottom border + trailing blank — omitted when openBottom so a reply box can connect.
+	if !openBottom {
+		lastBorderFg := threadBorderFg
+		if highlighted && hlIdx > 0 {
+			if len(rcComments) == hlIdx {
+				lastBorderFg = hlBorderFg
+			} else {
+				lastBorderFg = defaultBorderFg
+			}
 		}
-	}
-	fillW := contentW - 2
-	if fillW < 0 {
-		fillW = 0
-	}
-	bottomLine := gutterStr + lastBorderFg + "╰" + strings.Repeat("─", fillW) + "╯" + "\033[0m"
-	b.WriteString(padWithBg(bottomLine, width, bg))
-	b.WriteString("\n")
+		fillW := contentW - 2
+		if fillW < 0 {
+			fillW = 0
+		}
+		bottomLine := gutterStr + lastBorderFg + "╰" + strings.Repeat("─", fillW) + "╯" + "\033[0m"
+		b.WriteString(padWithBg(bottomLine, width, bg))
+		b.WriteString("\n")
 
-	// Blank line below.
-	b.WriteString(emptyLine(bg, width))
-	lineCount++ // bottom border
-	lineCount++ // blank line below
+		// Blank line below.
+		b.WriteString(emptyLine(bg, width))
+		lineCount++ // bottom border
+		lineCount++ // blank line below
+	}
 
 	return commentThreadResult{
 		content:      b.String(),

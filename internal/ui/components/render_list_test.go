@@ -5,7 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/lipgloss/v2"
 	"github.com/blakewilliams/ghq/internal/github"
+	"github.com/blakewilliams/ghq/internal/review/comments"
 	"github.com/blakewilliams/ghq/internal/ui/styles"
 )
 
@@ -45,12 +47,12 @@ func makeDiffLineItem(idx int, lt LineType, content string) *DiffLineItem {
 }
 
 func makeThreadItem(diffLineIdx int, side string, line int, bodies ...string) *CommentThreadItem {
-	var comments []github.ReviewComment
+	var comments []RenderComment
 	for _, body := range bodies {
-		comments = append(comments, github.ReviewComment{
+		comments = append(comments, ReviewCommentToRender(github.ReviewComment{
 			User: github.User{Login: "testuser"},
 			Body: body,
-		})
+		}))
 	}
 	return NewCommentThreadItem(diffLineIdx, side, line, comments, LineAdd)
 }
@@ -312,7 +314,7 @@ func TestBuildRenderList_OutputStructure(t *testing.T) {
 	colors := testColors()
 	formatDiffLinesFromHL(formattedLines, nil, nil, "test.go", 80, colors, colW)
 
-	comments := []github.ReviewComment{
+	reviewComments := []github.ReviewComment{
 		{
 			ID:   1,
 			Body: "looks good",
@@ -325,7 +327,7 @@ func TestBuildRenderList_OutputStructure(t *testing.T) {
 	}
 
 	// Build render list.
-	list := BuildRenderList(formattedLines, comments)
+	list := BuildRenderList(formattedLines, reviewComments)
 	rc := RenderContext{Width: 80, Colors: colors, ColW: colW}
 	result := list.String(rc)
 
@@ -363,5 +365,245 @@ func TestBuildRenderList_OutputStructure(t *testing.T) {
 	}
 	if positions[0].Offset <= 0 || positions[0].Offset >= len(resultLines) {
 		t.Errorf("comment offset %d out of range (content has %d lines)", positions[0].Offset, len(resultLines))
+	}
+}
+
+func TestToolGroupRendering(t *testing.T) {
+	width := 80
+	colors := testColors()
+	colW := 4
+
+	// Create a RenderComment with text + tool group + text blocks.
+	rc := RenderComment{
+		Author:    "copilot",
+		CreatedAt: time.Now(),
+		Blocks: []comments.ContentBlock{
+			comments.TextBlock{Text: "Let me check the code."},
+			comments.ToolGroupBlock{Tools: []comments.ToolCall{
+				{Name: "read_file", Status: "done"},
+				{Name: "search_code", Status: "done"},
+			}},
+			comments.TextBlock{Text: "Here is the fix."},
+		},
+	}
+
+	thread := NewCommentThreadItem(0, "RIGHT", 1, []RenderComment{rc}, LineAdd)
+	rendered := thread.Render(RenderContext{Width: width, Colors: colors, ColW: colW})
+
+	lines := strings.Split(rendered, "\n")
+
+	// Every non-empty line must be exactly `width` visual columns.
+	for i, line := range lines {
+		if line == "" {
+			continue
+		}
+		visW := lipgloss.Width(line)
+		if visW != width {
+			t.Errorf("line %d: visual width %d, want %d: %q", i, visW, width, line)
+		}
+	}
+
+	// Should contain tool-related symbols.
+	raw := strings.Join(lines, "\n")
+	if !strings.Contains(raw, "read_file") {
+		t.Error("expected 'read_file' in rendered output")
+	}
+	if !strings.Contains(raw, "search_code") {
+		t.Error("expected 'search_code' in rendered output")
+	}
+	// Done tools use ● marker.
+	if !strings.Contains(raw, "●") {
+		t.Error("expected ● marker for done tools")
+	}
+	// Rounded borders (no "Tools" label — implied).
+	if !strings.Contains(raw, "╭") || !strings.Contains(raw, "╯") {
+		t.Error("expected rounded border characters ╭ and ╯")
+	}
+}
+
+func TestToolGroupRendering_Running(t *testing.T) {
+	width := 80
+	colors := testColors()
+	colW := 4
+
+	rc := RenderComment{
+		Author:    "copilot",
+		CreatedAt: time.Now(),
+		Blocks: []comments.ContentBlock{
+			comments.ToolGroupBlock{Tools: []comments.ToolCall{
+				{Name: "read_file", Status: "done"},
+				{Name: "apply_edit", Status: "running"},
+			}},
+		},
+	}
+
+	thread := NewCommentThreadItem(0, "RIGHT", 1, []RenderComment{rc}, LineAdd)
+	rendered := thread.Render(RenderContext{Width: width, Colors: colors, ColW: colW})
+
+	// Running tools use a braille spinner (first frame ⠋ at animFrame=0).
+	spinFrames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	hasSpinner := false
+	for _, f := range spinFrames {
+		if strings.Contains(rendered, f) {
+			hasSpinner = true
+			break
+		}
+	}
+	if !hasSpinner {
+		t.Error("expected braille spinner marker for running tools")
+	}
+	// Done tools still get ●.
+	if !strings.Contains(rendered, "●") {
+		t.Error("expected ● marker for done tools")
+	}
+}
+
+func TestToolGroupRendering_Failed(t *testing.T) {
+	width := 80
+	colors := testColors()
+	colW := 4
+
+	rc := RenderComment{
+		Author:    "copilot",
+		CreatedAt: time.Now(),
+		Blocks: []comments.ContentBlock{
+			comments.ToolGroupBlock{Tools: []comments.ToolCall{
+				{Name: "write_file", Status: "failed"},
+			}},
+		},
+	}
+
+	thread := NewCommentThreadItem(0, "RIGHT", 1, []RenderComment{rc}, LineAdd)
+	rendered := thread.Render(RenderContext{Width: width, Colors: colors, ColW: colW})
+
+	// Failed tools should use ✕ marker.
+	if !strings.Contains(rendered, "✕") {
+		t.Error("expected ✕ marker for failed tools")
+	}
+}
+
+func TestBuildThreadedRenderComments_PreservesBlocks(t *testing.T) {
+	// Simulate: user comment (no blocks) + copilot reply (with tool blocks).
+	// The block lookup should preserve tool calls on the copilot reply.
+	line := 5
+	replyTo := 100
+	reviewComments := []github.ReviewComment{
+		{
+			ID:   100,
+			Body: "please fix this",
+			Side: "RIGHT",
+			Line: &line,
+			User: github.User{Login: "you"},
+		},
+		{
+			ID:          200,
+			Body:        "Here is the fix",
+			Side:        "RIGHT",
+			InReplyToID: &replyTo,
+			User:        github.User{Login: "copilot"},
+		},
+	}
+
+	// Block lookup: copilot reply (ID=200) has text + tool group + text.
+	blockLookup := map[int][]comments.ContentBlock{
+		200: {
+			comments.TextBlock{Text: "Let me check"},
+			comments.ToolGroupBlock{Tools: []comments.ToolCall{
+				{Name: "read_file", Status: "done"},
+				{Name: "apply_edit", Status: "done"},
+			}},
+			comments.TextBlock{Text: "Here is the fix"},
+		},
+	}
+
+	threaded := BuildThreadedRenderComments(reviewComments, blockLookup)
+	key := CommentKey{Side: "RIGHT", Line: 5}
+	thread, ok := threaded[key]
+	if !ok {
+		t.Fatal("expected thread at RIGHT:5")
+	}
+	if len(thread) != 2 {
+		t.Fatalf("expected 2 comments in thread, got %d", len(thread))
+	}
+
+	// First comment (user): should be plain TextBlock from Body.
+	if len(thread[0].Blocks) != 1 {
+		t.Errorf("user comment: expected 1 block, got %d", len(thread[0].Blocks))
+	}
+	if tb, ok := thread[0].Blocks[0].(comments.TextBlock); !ok || tb.Text != "please fix this" {
+		t.Errorf("user comment block = %+v", thread[0].Blocks[0])
+	}
+
+	// Second comment (copilot): should preserve all 3 blocks from lookup.
+	if len(thread[1].Blocks) != 3 {
+		t.Fatalf("copilot comment: expected 3 blocks, got %d", len(thread[1].Blocks))
+	}
+	if _, ok := thread[1].Blocks[0].(comments.TextBlock); !ok {
+		t.Error("copilot block 0: expected TextBlock")
+	}
+	if tg, ok := thread[1].Blocks[1].(comments.ToolGroupBlock); !ok {
+		t.Error("copilot block 1: expected ToolGroupBlock")
+	} else if len(tg.Tools) != 2 {
+		t.Errorf("copilot block 1: expected 2 tools, got %d", len(tg.Tools))
+	}
+	if _, ok := thread[1].Blocks[2].(comments.TextBlock); !ok {
+		t.Error("copilot block 2: expected TextBlock")
+	}
+
+	// Now render it and verify tool markers appear.
+	width := 80
+	colors := testColors()
+	ct := NewCommentThreadItem(0, "RIGHT", 5, thread, LineAdd)
+	out := ct.Render(RenderContext{Width: width, Colors: colors, ColW: 4})
+	if !strings.Contains(out, "●") {
+		t.Error("expected ● marker for done tools in rendered output")
+	}
+	if !strings.Contains(out, "read_file") {
+		t.Error("expected 'read_file' in rendered output")
+	}
+}
+
+func TestToolGroupRendering_CustomLabel(t *testing.T) {
+	width := 80
+	colors := testColors()
+	colW := 4
+
+	// Tool group with a custom label (from report_intent).
+	rc := RenderComment{
+		Author:    "copilot",
+		CreatedAt: time.Now(),
+		Blocks: []comments.ContentBlock{
+			comments.ToolGroupBlock{
+				Label: "Exploring codebase",
+				Tools: []comments.ToolCall{
+					{Name: "grep", Status: "done", Arguments: "pattern=TODO"},
+					{Name: "view", Status: "done", Arguments: "path=/src/main.go"},
+				},
+			},
+		},
+	}
+
+	thread := NewCommentThreadItem(0, "RIGHT", 1, []RenderComment{rc}, LineAdd)
+	rendered := thread.Render(RenderContext{Width: width, Colors: colors, ColW: colW})
+
+	// Should show custom label, not "Tools".
+	if !strings.Contains(rendered, "Exploring codebase") {
+		t.Error("expected custom label 'Exploring codebase' in rendered output")
+	}
+	if strings.Contains(rendered, " Tools ") {
+		t.Error("should not contain default 'Tools' label when custom label is set")
+	}
+	// Should show arguments.
+	if !strings.Contains(rendered, "pattern=TODO") {
+		t.Error("expected tool arguments in rendered output")
+	}
+	// Width check.
+	for i, line := range strings.Split(rendered, "\n") {
+		if line == "" {
+			continue
+		}
+		if visW := lipgloss.Width(line); visW != width {
+			t.Errorf("line %d: visual width %d, want %d", i, visW, width)
+		}
 	}
 }

@@ -2,6 +2,7 @@ package localdiff
 
 import (
 	"fmt"
+	"image/color"
 	"os/exec"
 	"strings"
 	"time"
@@ -13,10 +14,12 @@ import (
 	"github.com/blakewilliams/ghq/internal/git"
 	"github.com/blakewilliams/ghq/internal/git/watcher"
 	"github.com/blakewilliams/ghq/internal/github"
+	"github.com/blakewilliams/ghq/internal/review/agents"
+	"github.com/blakewilliams/ghq/internal/review/agents/copilot"
 	"github.com/blakewilliams/ghq/internal/review/comments"
-	"github.com/blakewilliams/ghq/internal/review/copilot"
 	"github.com/blakewilliams/ghq/internal/ui/components"
 	"github.com/blakewilliams/ghq/internal/ui/diffviewer"
+	"github.com/blakewilliams/ghq/internal/ui/markdown"
 	"github.com/blakewilliams/ghq/internal/ui/picker"
 	"github.com/blakewilliams/ghq/internal/ui/styles"
 	"github.com/blakewilliams/ghq/internal/ui/uictx"
@@ -139,10 +142,12 @@ type Model struct {
 func New(ctx *uictx.Context, repoRoot string, width, height int) Model {
 	branch, _ := git.CurrentBranch(repoRoot)
 	w, _ := watcher.New(repoRoot, nil)
-	cp, _ := copilot.New(repoRoot)
+	copilotClient, _ := copilot.New(repoRoot)
+	go copilotClient.Start()
 	active := comments.LoadActiveState(repoRoot, branch)
-	vs := comments.LoadViewState(repoRoot, branch, active.Mode)
+	commentViewState := comments.LoadViewState(repoRoot, branch, active.Mode)
 	cs := comments.LoadComments(repoRoot)
+	mdRenderer := markdown.NewRenderer(nil)
 	dv := diffviewer.DiffViewer{
 		Ctx:             ctx,
 		Width:           width,
@@ -155,9 +160,12 @@ func New(ctx *uictx.Context, repoRoot string, width, height int) Model {
 			Focused:    true,
 			ChromeRows: 2,
 		},
-		Copilot:         cp,
-		CopilotReplyBuf: make(map[string]string),
-		RenderBody:      renderMarkdownBody,
+		Agent:        agents.New(copilotClient),
+		CopilotState: diffviewer.NewCopilotState(),
+		RenderBody: func(body string, w int, bg string) string {
+			mdRenderer.SetChromaStyle(ctx.DiffColors.ChromaStyle)
+			return mdRenderer.RenderBody(body, w, bg)
+		},
 	}
 	dv.InitSpinner()
 
@@ -169,9 +177,9 @@ func New(ctx *uictx.Context, repoRoot string, width, height int) Model {
 		mode:          active.Mode,
 		watcher:       w,
 		commentStore:  cs,
-		savedFilename: vs.Filename,
-		savedLineNo:   vs.LineNo,
-		savedSide:     vs.Side,
+		savedFilename: commentViewState.Filename,
+		savedLineNo:   commentViewState.LineNo,
+		savedSide:     commentViewState.Side,
 	}
 	m.dv.Comments = commentStoreAdapter{store: cs}
 	return m
@@ -272,9 +280,6 @@ func (m Model) Init() tea.Cmd {
 		cmds = append(cmds, m.watcher.WaitCmd())
 		cmds = append(cmds, m.watcher.BranchWaitCmd())
 	}
-	if m.dv.Copilot != nil {
-		cmds = append(cmds, m.dv.Copilot.ListenCmd())
-	}
 	// Auto-detect PR for this branch (uses internal msg type so app doesn't intercept).
 	if !m.branchData.prLoaded {
 		client := m.ctx.Client
@@ -320,29 +325,13 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 		// Width changed — layouts need recomputing.
 		if m.dv.FilesListLoaded {
 			m.dv.ReformatAllFiles()
+			// Re-apply open bottom if composing a reply.
+			if m.dv.Composing && m.replyToID != "" {
+				m.dv.SetThreadOpenBottom(m.dv.CurrentFileIdx, m.dv.CommentSide, m.dv.CommentLine, true)
+			}
 		}
 		m.rebuildContent()
 		return m, nil
-
-	case tea.MouseClickMsg:
-		if msg.X < m.dv.Tree.Width {
-			if idx, ok := m.dv.Tree.EntryIndexAtY(msg.Y); ok {
-				if idx >= 0 && idx < len(m.dv.Tree.Entries) {
-					e := m.dv.Tree.Entries[idx]
-					if !e.IsDir && e.FileIndex >= 0 {
-						m.dv.Tree.Cursor = idx
-						cmd := m.selectTreeEntry()
-						return m, cmd
-					}
-				}
-			}
-			return m, nil
-		} else if m.dv.CurrentFileIdx >= 0 {
-			if cursor := m.dv.DiffCursorFromScreenY(msg.Y); cursor >= 0 {
-				m.dv.DiffCursor = cursor
-			}
-			return m, nil
-		}
 
 	case diffLoadedMsg:
 		// Remember which file we're viewing by name (not index) so we
@@ -517,6 +506,10 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 					m.dv.FormatFile(i)
 				}
 			}
+			// Re-apply open bottom if composing a reply.
+			if m.dv.Composing && m.replyToID != "" {
+				m.dv.SetThreadOpenBottom(m.dv.CurrentFileIdx, m.dv.CommentSide, m.dv.CommentLine, true)
+			}
 			m.dv.RebuildContentIfChanged(m.buildOverviewContent, m.buildFileContent)
 		}
 		// Re-arm the timer if we still have a PR.
@@ -617,95 +610,47 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 		m.dv.FilesLoading = false
 		return m, nil
 
-	case copilot.ReplyMsg:
-		m.dv.CopilotReplyBuf[msg.CommentID] += msg.Content
-		if msg.Done {
-			body := m.dv.CopilotReplyBuf[msg.CommentID]
-			delete(m.dv.CopilotReplyBuf, msg.CommentID)
-			pendingPath := m.dv.CopilotPendingPath(msg.CommentID)
-			m.dv.ClearCopilotPending(msg.CommentID)
-			if body != "" {
-				for _, c := range m.commentStore.Comments {
-					if c.ID == msg.CommentID {
-						reply := comments.LocalComment{
-							ID:          uuid.New().String(),
-							Body:        strings.TrimSpace(body),
-							Path:        c.Path,
-							Line:        c.Line,
-							Side:        c.Side,
-							InReplyToID: c.ID,
-							Author:      "copilot",
-							CreatedAt:   time.Now(),
-						}
-						m.commentStore.Add(reply)
-						break
+	case copilotTickMsg:
+		if !m.dv.CopilotState.HasPending() {
+			return m, nil
+		}
+
+		// Drain all buffered events.
+		dirtyFiles := map[int]bool{}
+		if m.dv.Agent != nil {
+			for _, ev := range m.dv.Agent.Drain() {
+				result := m.dv.CopilotState.HandleEvent(ev)
+				if result.Reply != nil {
+					m.persistCopilotReply(result.Reply)
+				}
+				if result.FilePath != "" {
+					if fileIdx := m.fileIndexForPath(result.FilePath); fileIdx >= 0 {
+						dirtyFiles[fileIdx] = true
 					}
 				}
 			}
-			if fileIdx := m.fileIndexForPath(pendingPath); fileIdx >= 0 {
-				m.formatFile(fileIdx)
-				if fileIdx == m.dv.CurrentFileIdx {
-					m.rebuildContent()
-				}
-			}
-		} else if fileIdx := m.fileIndexForPath(m.dv.CopilotPendingPath(msg.CommentID)); fileIdx >= 0 && fileIdx == m.dv.CurrentFileIdx {
-			m.formatFile(fileIdx)
-			m.rebuildContent()
 		}
-		cmds := []tea.Cmd{m.dv.Copilot.ListenCmd()}
-		if m.dv.HasCopilotPending() {
-			cmds = append(cmds, tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg {
-				return copilotTickMsg{}
-			}))
-		}
-		return m, tea.Batch(cmds...)
 
-	case copilot.ErrorMsg:
-		pendingPath := m.dv.CopilotPendingPath(msg.CommentID)
-		m.dv.ClearCopilotPending(msg.CommentID)
-		if fileIdx := m.fileIndexForPath(pendingPath); fileIdx >= 0 {
+		m.dv.CopilotState.AdvanceDots()
+
+		// Re-render files that had completed/error events.
+		for fileIdx := range dirtyFiles {
 			m.formatFile(fileIdx)
 		}
-		m.rebuildContent()
-		cmds := []tea.Cmd{}
-		if m.dv.Copilot != nil {
-			cmds = append(cmds, m.dv.Copilot.ListenCmd())
-		}
-		return m, tea.Batch(cmds...)
 
-	case copilot.ToolMsg:
-		if m.dv.CopilotToolState == nil {
-			m.dv.CopilotToolState = make(map[string]string)
-		}
-		if msg.Done {
-			delete(m.dv.CopilotToolState, msg.CommentID)
-		} else {
-			m.dv.CopilotToolState[msg.CommentID] = msg.Name
-		}
-		if fileIdx := m.fileIndexForPath(m.dv.CopilotPendingPath(msg.CommentID)); fileIdx >= 0 && fileIdx == m.dv.CurrentFileIdx {
-			m.formatFile(fileIdx)
-			m.rebuildContent()
-		}
-		if m.dv.Copilot != nil {
-			return m, m.dv.Copilot.ListenCmd()
-		}
-		return m, nil
-
-	case copilotTickMsg:
-		if !m.dv.HasCopilotPending() {
-			return m, nil
-		}
-		m.dv.CopilotDots = (m.dv.CopilotDots + 1) % 4
-		// Splice pending threads in the current file (O(thread), not O(n)).
-		for commentID, info := range m.dv.CopilotPending {
+		// Splice pending threads in the current file.
+		for commentID, info := range m.dv.CopilotState.Pending {
 			if fileIdx := m.fileIndexForPath(info.Path); fileIdx >= 0 && fileIdx == m.dv.CurrentFileIdx {
 				m.spliceThreadForComment(fileIdx, commentID)
 			}
 		}
 		m.rebuildContentIfChanged()
-		return m, tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg {
-			return copilotTickMsg{}
-		})
+		if m.dv.CopilotState.HasPending() {
+			return m, tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg {
+				return copilotTickMsg{}
+			})
+		}
+		return m, nil
 
 	case GoToLineMsg:
 		if m.dv.CurrentFileIdx >= 0 && m.dv.HasDiffLines() {
@@ -1154,6 +1099,9 @@ func (m *Model) buildVirtualFileContent(idx, w int) string {
 			return m.dv.SpinnerView()
 		}
 		m.dv.FormatFile(idx)
+		if m.dv.Composing && m.replyToID != "" && idx == m.dv.CurrentFileIdx {
+			m.dv.SetThreadOpenBottom(idx, m.dv.CommentSide, m.dv.CommentLine, true)
+		}
 		rendered = m.dv.RenderedFiles[idx]
 	}
 
@@ -1184,9 +1132,37 @@ func stripAnsi(s string) string {
 	return string(result)
 }
 
+// persistCopilotReply saves a completed copilot reply to the comment store.
+func (m *Model) persistCopilotReply(reply *diffviewer.CompletedReply) {
+	for _, c := range m.commentStore.Comments {
+		if c.ID == reply.CommentID {
+			r := comments.LocalComment{
+				ID:          uuid.New().String(),
+				Body:        reply.Body,
+				Path:        c.Path,
+				Line:        c.Line,
+				Side:        c.Side,
+				InReplyToID: c.ID,
+				Author:      "copilot",
+				CreatedAt:   time.Now(),
+				Blocks:      reply.Blocks,
+			}
+			m.commentStore.Add(r)
+			return
+		}
+	}
+}
+
+// closeReplyThread restores the thread's bottom border after composing ends.
+func (m *Model) closeReplyThread() {
+	if m.replyToID != "" {
+		m.dv.SetThreadOpenBottom(m.dv.CurrentFileIdx, m.dv.CommentSide, m.dv.CommentLine, false)
+	}
+}
+
 // spliceThreadForComment delegates to DiffViewer's splice method.
 func (m *Model) spliceThreadForComment(fileIdx int, commentID string) {
-	info, ok := m.dv.CopilotPending[commentID]
+	info, ok := m.dv.CopilotState.Pending[commentID]
 	if !ok {
 		m.dv.FormatFile(fileIdx)
 		return
@@ -1249,6 +1225,10 @@ func (m Model) highlightFileCmd(index int) tea.Cmd {
 
 func (m *Model) formatFile(index int) {
 	m.dv.FormatFile(index)
+	// Re-apply open bottom if composing a reply on this file.
+	if m.dv.Composing && m.replyToID != "" && index == m.dv.CurrentFileIdx {
+		m.dv.SetThreadOpenBottom(index, m.dv.CommentSide, m.dv.CommentLine, true)
+	}
 }
 
 // updateThreadHighlight re-renders just the thread at the cursor with updated highlighting.
@@ -1278,6 +1258,27 @@ func (a commentStoreAdapter) CommentsForFile(filename string) []github.ReviewCom
 		}
 	}
 	return result
+}
+
+// BlocksForFile implements diffviewer.BlockSource — returns content blocks
+// for local comments that have them (e.g. copilot replies with tool calls).
+// Keyed by the deterministic ReviewComment.ID (from IDToInt).
+func (a commentStoreAdapter) BlocksForFile(filename string) map[int][]comments.ContentBlock {
+	if a.store == nil {
+		return nil
+	}
+	locals := a.store.ForFileLocal(filename)
+	if len(locals) == 0 {
+		return nil
+	}
+	lookup := make(map[int][]comments.ContentBlock)
+	for _, lc := range locals {
+		blocks := comments.NormalizedBlocks(lc.Blocks, lc.Body)
+		if len(blocks) > 0 {
+			lookup[comments.IDToInt(lc.ID)] = blocks
+		}
+	}
+	return lookup
 }
 
 // commentsForFile returns comments for a file by index (convenience).
@@ -1317,113 +1318,6 @@ func (m Model) reviewCommentsTimer() tea.Cmd {
 	})
 }
 
-// renderMarkdownBody does lightweight inline markdown rendering suitable
-// for comment thread boxes. Wraps text to width, applies bold, italic,
-// code, and code block formatting. Uses reset+bg instead of bare \033[0m
-// so the diff background color survives through formatting resets.
-func renderMarkdownBody(body string, width int, bg string) string {
-	reset := "\033[0m" + bg
-
-	var out strings.Builder
-	inCodeBlock := false
-
-	for _, line := range strings.Split(body, "\n") {
-		// Fenced code blocks — don't wrap, just indent.
-		if strings.HasPrefix(line, "```") {
-			inCodeBlock = !inCodeBlock
-			if inCodeBlock {
-				out.WriteString("\033[90m" + bg)
-			} else {
-				out.WriteString(reset)
-			}
-			continue
-		}
-		if inCodeBlock {
-			out.WriteString("  " + line + "\n")
-			continue
-		}
-
-		for _, wrapped := range wordWrap(line, width) {
-			out.WriteString(renderInlineMarkdown(wrapped, reset) + "\n")
-		}
-	}
-
-	if inCodeBlock {
-		out.WriteString(reset)
-	}
-
-	return strings.TrimRight(out.String(), "\n")
-}
-
-// wordWrap splits a line into multiple lines at word boundaries to fit width.
-// Uses visible width (not byte length) so ANSI codes don't break wrapping.
-func wordWrap(line string, width int) []string {
-	if width <= 0 || lipgloss.Width(line) <= width {
-		return []string{line}
-	}
-	words := strings.Fields(line)
-	if len(words) == 0 {
-		return []string{""}
-	}
-	var lines []string
-	cur := words[0]
-	for _, w := range words[1:] {
-		// Use len here since we're working with plain text before ANSI is applied.
-		if len(cur)+1+len(w) > width {
-			lines = append(lines, cur)
-			cur = w
-		} else {
-			cur += " " + w
-		}
-	}
-	lines = append(lines, cur)
-	return lines
-}
-
-// renderInlineMarkdown handles bold, italic, and inline code.
-// reset should be "\033[0m" + bg to preserve the diff background.
-func renderInlineMarkdown(line string, reset string) string {
-	// Inline code: `code`
-	for {
-		start := strings.Index(line, "`")
-		if start < 0 {
-			break
-		}
-		end := strings.Index(line[start+1:], "`")
-		if end < 0 {
-			break
-		}
-		end += start + 1
-		code := line[start+1 : end]
-		line = line[:start] + "\033[36m" + code + reset + line[end+1:]
-	}
-
-	// Bold: **text** or __text__
-	line = replaceMarkdownPair(line, "**", "\033[1m", reset)
-	line = replaceMarkdownPair(line, "__", "\033[1m", reset)
-
-	// Italic: *text* or _text_
-	line = replaceMarkdownPair(line, "*", "\033[3m", reset)
-
-	return line
-}
-
-func replaceMarkdownPair(s, delim, open, close string) string {
-	for {
-		start := strings.Index(s, delim)
-		if start < 0 {
-			break
-		}
-		end := strings.Index(s[start+len(delim):], delim)
-		if end < 0 {
-			break
-		}
-		end += start + len(delim)
-		inner := s[start+len(delim) : end]
-		s = s[:start] + open + inner + close + s[end+len(delim):]
-	}
-	return s
-}
 
 // needsRenderBufferUpdate returns true if the viewport scrolled outside
 // the pre-rendered buffer and needs a fresh render.
@@ -1664,16 +1558,24 @@ func (m *Model) scrollToThreadCursorBottom() {
 }
 
 // scrollCommentBoxIntoView scrolls the viewport so the comment input box
-// (which is inserted after the cursor line) is fully visible.
+// (which is inserted after the cursor line or after a thread) is fully visible.
 func (m *Model) scrollCommentBoxIntoView() {
 	idx := m.dv.CurrentFileIdx
 	if idx < 0 || idx >= len(m.dv.FileDiffOffsets) || m.dv.DiffCursor >= len(m.dv.FileDiffOffsets[idx]) {
 		return
 	}
 	vpH := m.dv.ViewportHeight()
-	cursorLine := m.dv.FileDiffOffsets[idx][m.dv.DiffCursor]
-	// The comment box is ~8 lines (border + textarea + hints) inserted after the cursor line.
-	boxBottom := cursorLine + 10
+
+	// Determine where the box is actually inserted.
+	insertLine := m.dv.FileDiffOffsets[idx][m.dv.DiffCursor]
+	if m.replyToID != "" {
+		if endOffset := m.dv.ThreadEndOffset(idx, m.dv.CommentSide, m.dv.CommentLine); endOffset > 0 {
+			insertLine = endOffset - 1
+		}
+	}
+
+	// The comment box is ~8 lines (border + textarea + hints).
+	boxBottom := insertLine + 10
 	bottom := m.dv.VP.YOffset() + vpH - 1
 	if boxBottom > bottom {
 		m.dv.VP.SetYOffset(boxBottom - vpH + 1)
@@ -1685,6 +1587,7 @@ func (m *Model) scrollCommentBoxIntoView() {
 func (m Model) handleCommentKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 	switch msg.String() {
 	case "esc":
+		m.closeReplyThread()
 		m.dv.Composing = false
 		m.dv.SelectionAnchor = -1
 		m.rebuildContent()
@@ -1697,11 +1600,13 @@ func (m Model) handleCommentKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 	case "enter":
 		body := strings.TrimSpace(m.dv.CommentInput.Value())
 		if body == "" {
+			m.closeReplyThread()
 			m.dv.Composing = false
 			m.dv.SelectionAnchor = -1
 			m.rebuildContent()
 			return m, nil, true
 		}
+		m.closeReplyThread()
 		m.dv.Composing = false
 
 		comment := comments.LocalComment{
@@ -1723,9 +1628,9 @@ func (m Model) handleCommentKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 		m.dv.SelectionAnchor = -1
 
 		// Set copilot pending state BEFORE rebuild so "Thinking..." shows immediately.
-		if m.dv.Copilot != nil {
-			m.dv.SetCopilotPending(comment.ID, comment.Path, comment.Line, comment.Side)
-			m.dv.CopilotDots = 0
+		if m.dv.Agent != nil {
+			m.dv.CopilotState.SetPending(comment.ID, comment.Path, comment.Line, comment.Side)
+			m.dv.CopilotState.Dots = 0
 		}
 
 		// Use render list operations to update the cached render.
@@ -1756,12 +1661,11 @@ func (m Model) handleCommentKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 			m.rebuildContent()
 		}
 
-		if m.dv.Copilot != nil {
+		if m.dv.Agent != nil {
 			diffHunk := m.getDiffHunkForComment(comment)
 			threadHistory := m.getThreadHistory(comment)
 			return m, tea.Batch(
-				m.dv.Copilot.SendComment(comment.ID, body, comment.Path, m.mode.String(), diffHunk, threadHistory),
-				m.dv.Copilot.ListenCmd(),
+				m.dv.Agent.SendComment(comment.ID, body, comment.Path, m.mode.String(), diffHunk, threadHistory),
 				tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg { return copilotTickMsg{} }),
 			), true
 		}
@@ -1845,8 +1749,14 @@ func (m Model) openCommentInput() (Model, tea.Cmd, bool) {
 	} else {
 		ta.Placeholder = "Add a comment..."
 	}
+	if m.replyToID != "" {
+		m.styleTextareaForThread(&ta)
+	}
 	m.dv.CommentInput = ta
 	m.dv.Composing = true
+	if m.replyToID != "" {
+		m.dv.SetThreadOpenBottom(m.dv.CurrentFileIdx, m.dv.CommentSide, m.dv.CommentLine, true)
+	}
 	m.rebuildContent()
 	m.scrollCommentBoxIntoView()
 	return m, ta.Focus(), true
@@ -1862,21 +1772,14 @@ func (m Model) insertCommentBox(rendered string, fileIdx int) string {
 		return rendered
 	}
 
-	// When replying to a thread, find the end of the existing thread block
-	// (the last line with a ╰ border character) so we insert right before
-	// the thread's closing border.
+	// When replying to a thread, use the render list to find the exact
+	// rendered line where the thread ends.
 	insertAt := cursorRenderedLine
 	if m.replyToID != "" {
-		// Scan forward from cursor line to find the thread's bottom border (╰).
-		for i := cursorRenderedLine + 1; i < len(lines); i++ {
-			if strings.Contains(lines[i], "╰") {
-				insertAt = i
-				break
-			}
-			// Stop if we hit another diff line (no gutter indent = not a comment).
-			if i > cursorRenderedLine+200 {
-				break
-			}
+		if endOffset := m.dv.ThreadEndOffset(fileIdx, m.dv.CommentSide, m.dv.CommentLine); endOffset > 0 {
+			// endOffset is the line count up to and including the thread.
+			// Subtract 1 to get the last line index of the thread.
+			insertAt = endOffset - 1
 		}
 	}
 
@@ -1890,59 +1793,40 @@ func (m Model) insertCommentBox(rendered string, fileIdx int) string {
 }
 
 func (m Model) renderCommentBox() string {
-	gutter := components.TotalGutterWidth(components.GutterColWidth(m.dv.FileDiffs[m.dv.CurrentFileIdx]))
-	indent := strings.Repeat(" ", gutter)
-	boxW := m.dv.ContentWidth() - gutter - 2
+	gutterW := components.TotalGutterWidth(components.GutterColWidth(m.dv.FileDiffs[m.dv.CurrentFileIdx]))
+	width := m.dv.ContentWidth()
+	boxW := width - gutterW - 2
 
 	taView := m.dv.CommentInput.View()
 
 	isReply := m.replyToID != ""
-	bc := m.dv.BorderStyle()
-	// Use highlighted border color for the reply box.
-	hlStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(m.ctx.DiffColors.HighlightBorderFg))
-	borderRender := bc.Render
+
+	// For replies, use the thread's bg color and gutter style.
+	var bg, gutterStr string
 	if isReply {
-		borderRender = hlStyle.Render
+		lt := m.dv.ThreadParentLineType(m.dv.CurrentFileIdx, m.dv.CommentSide, m.dv.CommentLine)
+		bg = components.BgForLineType(lt, m.ctx.DiffColors)
+		gutterStr = components.CommentGutter(bg, gutterW)
+	} else {
+		gutterStr = strings.Repeat(" ", gutterW)
 	}
 
-	var topLeft, bottomLeft string
+	// Border color: use raw ANSI escape to match thread rendering.
+	borderFg := m.ctx.DiffColors.BorderFg
 	if isReply {
-		topLeft = "├" // connects to thread above
-		bottomLeft = "╰"
+		borderFg = m.ctx.DiffColors.HighlightBorderFg
+	}
+
+	var topLeft, topRight string
+	if isReply {
+		topLeft = "├"
+		topRight = "┤"
 	} else {
 		topLeft = "╭"
-		bottomLeft = "╰"
+		topRight = "╮"
 	}
 
-	topRule := borderRender(topLeft + strings.Repeat("─", boxW) + "╮")
-	bottomRule := borderRender(bottomLeft + strings.Repeat("─", boxW) + "╯")
-	side := borderRender("│")
-
-	var boxLines []string
-
-	// Label for reply.
-	if isReply {
-		label := dimStyle.Render(" replying...")
-		fillW := boxW - lipgloss.Width(label)
-		if fillW < 0 {
-			fillW = 0
-		}
-		boxLines = append(boxLines, indent+topRule)
-		boxLines = append(boxLines, indent+side+label+strings.Repeat(" ", fillW)+side)
-	} else {
-		boxLines = append(boxLines, indent+topRule)
-	}
-
-	for _, line := range strings.Split(taView, "\n") {
-		visW := lipgloss.Width(line)
-		padW := boxW - 2 - visW
-		if padW < 0 {
-			padW = 0
-		}
-		boxLines = append(boxLines, indent+side+" "+line+strings.Repeat(" ", padW)+" "+side)
-	}
-	boxLines = append(boxLines, indent+bottomRule)
-
+	// Buttons (rendered early so we can measure them).
 	colors := m.ctx.DiffColors
 	cancelBtn := lipgloss.NewStyle().
 		Foreground(colors.PaletteDim).
@@ -1955,14 +1839,106 @@ func (m Model) renderCommentBox() string {
 		Padding(0, 1).
 		Render("Submit")
 
-	buttons := cancelBtn + " " + submitBtn
-	hintGap := boxW - lipgloss.Width(buttons)
-	if hintGap < 1 {
-		hintGap = 1
+	// Helper to render a bordered line (gutter + │ content │ with bg/padding).
+	innerW := boxW - 2
+	borderedLine := func(content string) string {
+		visW := lipgloss.Width(content)
+		padW := innerW - visW
+		if padW < 0 {
+			padW = 0
+		}
+		if isReply {
+			line := gutterStr + borderFg + "│" + "\033[0m" + bg +
+				" " + content + "\033[0m" + bg + strings.Repeat(" ", padW) + " " +
+				borderFg + "│" + "\033[0m"
+			return components.PadWithBg(line, width, bg)
+		}
+		bc := m.dv.BorderStyle()
+		side := bc.Render("│")
+		return gutterStr + side + " " + content + strings.Repeat(" ", padW) + " " + side
 	}
-	boxLines = append(boxLines, indent+" "+strings.Repeat(" ", hintGap)+buttons)
+
+	// Helper to render a horizontal rule (gutter + ├───┤ or ╭───╮ etc).
+	hRule := func(left, right string) string {
+		if isReply {
+			line := gutterStr + borderFg + left + strings.Repeat("─", boxW) + right + "\033[0m"
+			return components.PadWithBg(line, width, bg)
+		}
+		bc := m.dv.BorderStyle()
+		return gutterStr + bc.Render(left+strings.Repeat("─", boxW)+right)
+	}
+
+	var boxLines []string
+
+	// Top border — for replies, merge the "replying…" label.
+	if isReply {
+		label := " replying… "
+		labelW := lipgloss.Width(label)
+		fillW := boxW - labelW
+		if fillW < 0 {
+			fillW = 0
+		}
+		topLine := gutterStr + borderFg + topLeft + "\033[0m" + bg +
+			label +
+			borderFg + strings.Repeat("─", fillW) + topRight + "\033[0m"
+		boxLines = append(boxLines, components.PadWithBg(topLine, width, bg))
+	} else {
+		boxLines = append(boxLines, hRule(topLeft, topRight))
+	}
+
+	// Textarea body lines. Strip trailing whitespace from each line so that
+	// borderedLine can re-pad with the correct bg color.
+	for _, line := range strings.Split(taView, "\n") {
+		// The textarea pads lines to its width with unstyled spaces.
+		// Strip those so borderedLine's bg-aware padding takes over.
+		trimmed := stripTrailingSpaces(line)
+		boxLines = append(boxLines, borderedLine(trimmed))
+	}
+
+	// Separator between textarea and buttons.
+	boxLines = append(boxLines, hRule("├", "┤"))
+
+	// Button row inside the box, right-aligned.
+	btnSep := " "
+	if isReply {
+		btnSep = bg + " " + "\033[0m"
+	}
+	buttons := cancelBtn + btnSep + submitBtn
+	btnW := lipgloss.Width(buttons)
+	gap := innerW - btnW
+	if gap < 0 {
+		gap = 0
+	}
+	boxLines = append(boxLines, borderedLine(strings.Repeat(" ", gap)+buttons))
+
+	// Bottom border.
+	boxLines = append(boxLines, hRule("╰", "╯"))
+
+	// Trailing blank line to match thread spacing (replies only).
+	if isReply {
+		boxLines = append(boxLines, components.PadWithBg(bg, width, bg))
+	}
 
 	return strings.Join(boxLines, "\n")
+}
+
+// stripTrailingSpaces removes trailing whitespace and dangling ANSI resets
+// from a rendered textarea line, preserving styled content.
+func stripTrailingSpaces(s string) string {
+	// First strip trailing raw spaces.
+	s = strings.TrimRight(s, " ")
+	// Strip any trailing ANSI reset sequences like \033[m or \033[0m.
+	for {
+		if strings.HasSuffix(s, "\033[m") {
+			s = s[:len(s)-3]
+		} else if strings.HasSuffix(s, "\033[0m") {
+			s = s[:len(s)-4]
+		} else {
+			break
+		}
+		s = strings.TrimRight(s, " ")
+	}
+	return s
 }
 
 // cursorThreadInfo returns the path/line/side for the comment thread at the cursor.
@@ -2011,12 +1987,39 @@ func (m *Model) replyToThreadAtCursor() tea.Cmd {
 	ta.Prompt = ""
 	ta.Focus()
 	ta.Placeholder = "Reply to thread..."
+	m.styleTextareaForThread(&ta)
 	m.dv.CommentInput = ta
 	m.dv.Composing = true
+	m.dv.SetThreadOpenBottom(m.dv.CurrentFileIdx, side, line, true)
 	m.rebuildContent()
 	// Scroll to ensure the comment box is visible.
 	m.scrollCommentBoxIntoView()
 	return ta.Focus()
+}
+
+// styleTextareaForThread sets the textarea bg to match the thread's parent
+// line type: green tint for add, red tint for del, default otherwise.
+func (m *Model) styleTextareaForThread(ta *textarea.Model) {
+	lt := m.dv.ThreadParentLineType(m.dv.CurrentFileIdx, m.dv.CommentSide, m.dv.CommentLine)
+	colors := m.ctx.DiffColors
+	var bgColor color.Color
+	switch lt {
+	case components.LineAdd:
+		bgColor = colors.AddBgColor
+	case components.LineDel:
+		bgColor = colors.DelBgColor
+	}
+	if bgColor == nil {
+		return
+	}
+	s := ta.Styles()
+	s.Focused.Base = lipgloss.NewStyle().Background(bgColor)
+	s.Focused.CursorLine = lipgloss.NewStyle().Background(bgColor)
+	s.Focused.Placeholder = s.Focused.Placeholder.Background(bgColor)
+	s.Blurred.Base = lipgloss.NewStyle().Background(bgColor)
+	s.Blurred.CursorLine = lipgloss.NewStyle().Background(bgColor)
+	s.Blurred.Placeholder = s.Blurred.Placeholder.Background(bgColor)
+	ta.SetStyles(s)
 }
 
 // toggleResolveAtCursor resolves/unresolves the thread at the cursor.

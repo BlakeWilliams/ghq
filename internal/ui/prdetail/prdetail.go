@@ -7,8 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blakewilliams/ghq/internal/review/agents"
+	"github.com/blakewilliams/ghq/internal/review/agents/copilot"
 	"github.com/blakewilliams/ghq/internal/review/comments"
-	"github.com/blakewilliams/ghq/internal/review/copilot"
 	"github.com/blakewilliams/ghq/internal/github"
 	"github.com/blakewilliams/ghq/internal/git/watcher"
 	"github.com/blakewilliams/ghq/internal/ui/components"
@@ -218,7 +219,7 @@ func New(pr github.PullRequest, ctx *uictx.Context, width, height int) Model {
 			Focused:    true,
 			ChromeRows: 2,
 		},
-		CopilotReplyBuf: make(map[string]string),
+		CopilotState: diffviewer.NewCopilotState(),
 	}
 	dv.InitSpinner()
 
@@ -237,11 +238,12 @@ func (m *Model) SetLocalContext(repoRoot string) {
 	m.repoRoot = repoRoot
 	m.localBranch = true
 	// Close existing copilot client before creating a new one.
-	if m.dv.Copilot != nil {
-		m.dv.Copilot.Stop()
+	if m.dv.Agent != nil {
+		m.dv.Agent.Stop()
 	}
 	cp, _ := copilot.New(repoRoot)
-	m.dv.Copilot = cp
+	go cp.Start()
+	m.dv.Agent = agents.New(cp)
 	// Close existing watcher before creating a new one.
 	if m.refWatcher != nil {
 		m.refWatcher.Close()
@@ -338,9 +340,6 @@ func (m Model) Init() tea.Cmd {
 		fetchReviewComments(m.ctx.Client, m.owner, m.repo, m.pr.Number),
 		fetchCheckRuns(m.ctx.Client, m.owner, m.repo, m.pr.Head.SHA),
 	}
-	if m.dv.Copilot != nil {
-		cmds = append(cmds, m.dv.Copilot.ListenCmd())
-	}
 	if m.refWatcher != nil {
 		cmds = append(cmds, m.refWatcher.WaitCmd())
 	}
@@ -368,21 +367,6 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 		}
 		m.rebuildContent()
 		return m, tea.Batch(cmds...)
-
-	case tea.MouseClickMsg:
-		if msg.X < m.dv.Tree.Width {
-			if idx, ok := m.dv.Tree.EntryIndexAtY(msg.Y); ok {
-				if idx >= 0 && idx < len(m.dv.Tree.Entries) {
-					e := m.dv.Tree.Entries[idx]
-					if !e.IsDir && e.FileIndex >= 0 {
-						m.dv.Tree.Cursor = idx
-						cmd := m.selectTreeEntry()
-						return m, cmd
-					}
-				}
-			}
-			return m, nil
-		}
 
 	case tea.KeyPressMsg:
 		var cmd tea.Cmd
@@ -517,65 +501,42 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 	case uictx.QueryErrMsg:
 		return m, nil
 
-	case copilot.ReplyMsg:
-		m.dv.CopilotReplyBuf[msg.CommentID] += msg.Content
-		if msg.Done {
-			body := m.dv.CopilotReplyBuf[msg.CommentID]
-			delete(m.dv.CopilotReplyBuf, msg.CommentID)
-			pendingPath := m.dv.CopilotPendingPath(msg.CommentID)
-			m.dv.ClearCopilotPending(msg.CommentID)
-			if body != "" {
-				for _, c := range m.localComments.Comments {
-					if c.ID == msg.CommentID {
-						reply := comments.LocalComment{
-							ID:          uuid.New().String(),
-							Body:        strings.TrimSpace(body),
-							Path:        c.Path,
-							Line:        c.Line,
-							Side:        c.Side,
-							InReplyToID: c.ID,
-							Author:      "copilot",
-							CreatedAt:   time.Now(),
-						}
-						m.localComments.Add(reply)
-						break
-					}
+	case copilotTickMsg:
+		if !m.dv.CopilotState.HasPending() {
+			return m, nil
+		}
+
+		// Drain all buffered events, accumulate state only.
+		dirtyFiles := map[int]bool{}
+		if m.dv.Agent != nil {
+			for _, ev := range m.dv.Agent.Drain() {
+				if fileIdx := m.handleAgentEvent(ev); fileIdx >= 0 {
+					dirtyFiles[fileIdx] = true
 				}
 			}
-			if fileIdx := m.dv.FileIndexForPath(pendingPath); fileIdx >= 0 && fileIdx == m.dv.CurrentFileIdx {
-				m.formatFile(fileIdx)
-				m.rebuildContent()
-			}
-		} else if fileIdx := m.dv.FileIndexForPath(m.dv.CopilotPendingPath(msg.CommentID)); fileIdx >= 0 && fileIdx == m.dv.CurrentFileIdx {
+		}
+
+		m.dv.CopilotState.AdvanceDots()
+
+		// Re-render files that had completed/error events.
+		for fileIdx := range dirtyFiles {
 			m.formatFile(fileIdx)
-			m.rebuildContent()
 		}
-		cmds := []tea.Cmd{}
-		if m.dv.Copilot != nil {
-			cmds = append(cmds, m.dv.Copilot.ListenCmd())
-		}
-		return m, tea.Batch(cmds...)
 
-	case copilot.ErrorMsg:
-		m.dv.ClearCopilotPending(msg.CommentID)
-		cmds := []tea.Cmd{}
-		if m.dv.Copilot != nil {
-			cmds = append(cmds, m.dv.Copilot.ListenCmd())
-		}
-		return m, tea.Batch(cmds...)
-
-	case copilot.ToolMsg:
-		if m.dv.CopilotToolState == nil {
-			m.dv.CopilotToolState = make(map[string]string)
-		}
-		if msg.Done {
-			delete(m.dv.CopilotToolState, msg.CommentID)
-		} else {
-			m.dv.CopilotToolState[msg.CommentID] = msg.Name
+		// Re-render the current file if it has pending threads (for dots animation + streaming).
+		for _, info := range m.dv.CopilotState.Pending {
+			if fileIdx := m.dv.FileIndexForPath(info.Path); fileIdx >= 0 && fileIdx == m.dv.CurrentFileIdx {
+				if !dirtyFiles[fileIdx] {
+					m.formatFile(fileIdx)
+				}
+				break
+			}
 		}
 		m.rebuildContent()
-		if m.dv.Copilot != nil {
-			return m, m.dv.Copilot.ListenCmd()
+		if m.dv.CopilotState.HasPending() {
+			return m, tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg {
+				return copilotTickMsg{}
+			})
 		}
 		return m, nil
 
@@ -598,22 +559,6 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 			cmds = append(cmds, m.refWatcher.WaitCmd())
 		}
 		return m, tea.Batch(cmds...)
-
-	case copilotTickMsg:
-		if m.dv.HasCopilotPending() {
-			m.dv.CopilotDots = (m.dv.CopilotDots + 1) % 4
-			for _, info := range m.dv.CopilotPending {
-				if fileIdx := m.dv.FileIndexForPath(info.Path); fileIdx >= 0 && fileIdx == m.dv.CurrentFileIdx {
-					m.formatFile(fileIdx)
-					m.rebuildContent()
-					break
-				}
-			}
-			return m, tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg {
-				return copilotTickMsg{}
-			})
-		}
-		return m, nil
 
 	case editorFinishedMsg:
 		if msg.err == nil && msg.content != "" {
@@ -795,6 +740,125 @@ type editorFinishedMsg struct {
 	err     error
 }
 
+// handleAgentEvent processes a single event drained from the agent.
+// Returns the file index that needs re-rendering, or -1 if none.
+func (m *Model) handleAgentEvent(ev agents.AgentEvent) int {
+	switch ev.Kind {
+	case agents.EventDelta:
+		p := ev.Payload.(agents.DeltaPayload)
+		blocks := m.dv.CopilotState.ReplyBuf[ev.CommentID]
+		if n := len(blocks); n > 0 {
+			if tb, ok := blocks[n-1].(comments.TextBlock); ok {
+				blocks[n-1] = comments.TextBlock{Text: tb.Text + p.Delta}
+			} else {
+				blocks = append(blocks, comments.TextBlock{Text: p.Delta})
+			}
+		} else {
+			blocks = append(blocks, comments.TextBlock{Text: p.Delta})
+		}
+		m.dv.CopilotState.ReplyBuf[ev.CommentID] = blocks
+		return -1
+
+	case agents.EventDone:
+		blocks := m.dv.CopilotState.ReplyBuf[ev.CommentID]
+		delete(m.dv.CopilotState.ReplyBuf, ev.CommentID)
+		pendingPath := m.dv.CopilotState.PendingPath(ev.CommentID)
+		m.dv.CopilotState.ClearPending(ev.CommentID)
+		body := comments.BodyFromBlocks(blocks)
+		if body != "" || len(blocks) > 0 {
+			for _, c := range m.localComments.Comments {
+				if c.ID == ev.CommentID {
+					reply := comments.LocalComment{
+						ID:          uuid.New().String(),
+						Body:        strings.TrimSpace(body),
+						Path:        c.Path,
+						Line:        c.Line,
+						Side:        c.Side,
+						InReplyToID: c.ID,
+						Author:      "copilot",
+						CreatedAt:   time.Now(),
+						Blocks:      blocks,
+					}
+					m.localComments.Add(reply)
+					break
+				}
+			}
+		}
+		return m.dv.FileIndexForPath(pendingPath)
+
+	case agents.EventError:
+		pendingPath := m.dv.CopilotState.PendingPath(ev.CommentID)
+		m.dv.CopilotState.ClearPending(ev.CommentID)
+		return m.dv.FileIndexForPath(pendingPath)
+
+	case agents.EventToolStart:
+		p := ev.Payload.(agents.ToolPayload)
+		blocks := m.dv.CopilotState.ReplyBuf[ev.CommentID]
+
+		// report_intent is not a real tool — store as the current intent.
+		if p.Name == "report_intent" {
+			if m.dv.CopilotState.Intent == nil {
+				m.dv.CopilotState.Intent = make(map[string]string)
+			}
+			if p.Arguments != "" {
+				m.dv.CopilotState.Intent[ev.CommentID] = p.Arguments
+			}
+			if n := len(blocks); n > 0 {
+				if tg, ok := blocks[n-1].(comments.ToolGroupBlock); ok && p.Arguments != "" {
+					tg.Label = p.Arguments
+					blocks[n-1] = tg
+					m.dv.CopilotState.ReplyBuf[ev.CommentID] = blocks
+				}
+			}
+			return -1
+		}
+
+		tc := comments.ToolCall{Name: p.Name, CallID: p.CallID, Status: "running", Arguments: p.Arguments}
+		if n := len(blocks); n > 0 {
+			if tg, ok := blocks[n-1].(comments.ToolGroupBlock); ok {
+				tg.Tools = append(tg.Tools, tc)
+				blocks[n-1] = tg
+			} else {
+				blocks = append(blocks, comments.ToolGroupBlock{Tools: []comments.ToolCall{tc}})
+			}
+		} else {
+			blocks = append(blocks, comments.ToolGroupBlock{Tools: []comments.ToolCall{tc}})
+		}
+		m.dv.CopilotState.ReplyBuf[ev.CommentID] = blocks
+		return -1
+
+	case agents.EventToolComplete:
+		p := ev.Payload.(agents.ToolPayload)
+		if p.Name == "report_intent" {
+			return -1
+		}
+		blocks := m.dv.CopilotState.ReplyBuf[ev.CommentID]
+		for i := len(blocks) - 1; i >= 0; i-- {
+			if tg, ok := blocks[i].(comments.ToolGroupBlock); ok {
+				for j := range tg.Tools {
+					if tg.Tools[j].Status != "running" {
+						continue
+					}
+					matched := false
+					if p.CallID != "" && tg.Tools[j].CallID == p.CallID {
+						matched = true
+					} else if p.CallID == "" && tg.Tools[j].Name == p.Name {
+						matched = true
+					}
+					if matched {
+						tg.Tools[j].Status = "done"
+						blocks[i] = tg
+						m.dv.CopilotState.ReplyBuf[ev.CommentID] = blocks
+						return -1
+					}
+				}
+			}
+		}
+		return -1
+	}
+	return -1
+}
+
 func (m Model) handleCommentKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 	switch msg.String() {
 	case "esc":
@@ -833,10 +897,10 @@ func (m Model) handleCommentKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 		m.formatFile(m.dv.CurrentFileIdx)
 		m.rebuildContent()
 
-		if m.dv.Copilot != nil {
-			m.dv.SetCopilotPending(comment.ID, comment.Path, comment.Line, comment.Side)
+		if m.dv.Agent != nil {
+			m.dv.CopilotState.SetPending(comment.ID, comment.Path, comment.Line, comment.Side)
 			return m, tea.Batch(
-				m.dv.Copilot.SendComment(comment.ID, body, comment.Path, "Branch", "", nil),
+				m.dv.Agent.SendComment(comment.ID, body, comment.Path, "Branch", "", nil),
 				tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg { return copilotTickMsg{} }),
 			), true
 		}
@@ -1459,6 +1523,26 @@ func (s prCommentSource) CommentsForFile(filename string) []github.ReviewComment
 	return result
 }
 
+// BlocksForFile implements diffviewer.BlockSource — preserves content blocks
+// from local comments with tool calls.
+func (s prCommentSource) BlocksForFile(filename string) map[int][]comments.ContentBlock {
+	if s.localComments == nil {
+		return nil
+	}
+	locals := s.localComments.ForFileLocal(filename)
+	if len(locals) == 0 {
+		return nil
+	}
+	lookup := make(map[int][]comments.ContentBlock)
+	for _, lc := range locals {
+		blocks := comments.NormalizedBlocks(lc.Blocks, lc.Body)
+		if len(blocks) > 0 {
+			lookup[comments.IDToInt(lc.ID)] = blocks
+		}
+	}
+	return lookup
+}
+
 // syncCommentSource updates the DiffViewer's CommentSource with current data.
 // Must be called after reviewComments or localComments change.
 func (m *Model) syncCommentSource() {
@@ -1478,14 +1562,13 @@ func (m *Model) reformatAllFiles() {
 	m.dv.ReformatAllFiles()
 }
 
-// commentsForFile returns comments for a file (convenience, delegates to DiffViewer).
+// commentsForFile returns base comments for a file (no pending copilot).
 func (m Model) commentsForFile(filename string) []github.ReviewComment {
 	src := prCommentSource{
 		reviewComments: m.reviewComments,
 		localComments:  m.localComments,
 	}
-	result := src.CommentsForFile(filename)
-	return m.dv.AppendCopilotPending(filename, result)
+	return src.CommentsForFile(filename)
 }
 
 // prefetchFiles kicks off background fetches for the first n files' content,

@@ -11,7 +11,9 @@ import (
 	"github.com/blakewilliams/ghq/internal/git"
 	"github.com/blakewilliams/ghq/internal/github"
 	"github.com/blakewilliams/ghq/internal/terminal"
-	"github.com/blakewilliams/ghq/internal/review/copilot"
+	"github.com/blakewilliams/ghq/internal/review/agents"
+	"github.com/blakewilliams/ghq/internal/review/agents/copilot"
+	"github.com/blakewilliams/ghq/internal/ui/chat"
 	"github.com/blakewilliams/ghq/internal/ui/commandbar"
 	"github.com/blakewilliams/ghq/internal/ui/localdiff"
 	"github.com/blakewilliams/ghq/internal/ui/picker"
@@ -74,8 +76,8 @@ type Model struct {
 	commandBar  commandbar.Model
 	picker      picker.Model
 	pickerKind  string // "command", "help" — routes ResultMsg
-	copilotChat    copilot.ChatModel
-	chatClient     *copilot.Client // shared copilot client for chat
+	copilotChat    chat.Model
+	chatClient     *agents.Client
 	chatInitialized bool
 	ctx         *uictx.Context
 	quitPending bool // true after first ctrl+c
@@ -280,40 +282,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleCommand(commandbar.CommandMsg{Command: msg.Value})
 
-	case copilot.CloseMsg:
+	case chat.CloseMsg:
 		m.mode = modeNormal
 		return m, nil
-
-	// Route copilot messages by comment ID — "chat" goes to chat, others to active view.
-	case copilot.ReplyMsg:
-		if msg.CommentID == "chat" {
-			var cmd tea.Cmd
-			m.copilotChat, cmd = m.copilotChat.Update(msg)
-			return m, cmd
-		}
-		var cmd tea.Cmd
-		m.activeView, cmd = m.activeView.Update(msg)
-		return m, cmd
-
-	case copilot.ErrorMsg:
-		if msg.CommentID == "chat" {
-			var cmd tea.Cmd
-			m.copilotChat, cmd = m.copilotChat.Update(msg)
-			return m, cmd
-		}
-		var cmd tea.Cmd
-		m.activeView, cmd = m.activeView.Update(msg)
-		return m, cmd
-
-	case copilot.ToolMsg:
-		if msg.CommentID == "chat" {
-			var cmd tea.Cmd
-			m.copilotChat, cmd = m.copilotChat.Update(msg)
-			return m, cmd
-		}
-		var cmd tea.Cmd
-		m.activeView, cmd = m.activeView.Update(msg)
-		return m, cmd
 
 	default:
 		if m.mode == modeCommand {
@@ -457,11 +428,12 @@ func (m Model) openCopilotChat() (tea.Model, tea.Cmd) {
 		if err != nil {
 			return m, nil
 		}
-		m.chatClient = cp
+		go cp.Start()
+		m.chatClient = agents.New(cp)
 	}
 
 	// Build diff context from the active view.
-	ctx := copilot.DiffContext{
+	ctx := chat.DiffContext{
 		RepoRoot: m.repoRoot,
 	}
 	switch v := m.activeView.(type) {
@@ -486,16 +458,15 @@ func (m Model) openCopilotChat() (tea.Model, tea.Cmd) {
 	}
 
 	if !m.chatInitialized {
-		m.copilotChat = copilot.NewChat(m.chatClient, ctx, m.ctx.Username, chatW-4, chatH)
+		m.copilotChat = chat.New(m.chatClient, ctx, m.ctx.Username, chatW-4, chatH)
 		m.chatInitialized = true
 	}
 	m.mode = modeCopilotChat
-	cmds := []tea.Cmd{m.chatClient.ListenCmd()}
 	// Restart spinner if chat is still waiting for a response.
 	if resume := m.copilotChat.ResumeCmd(); resume != nil {
-		cmds = append(cmds, resume)
+		return m, resume
 	}
-	return m, tea.Batch(cmds...)
+	return m, nil
 }
 
 func (m Model) renderChatOverlay(bg string, bgHeight int) string {

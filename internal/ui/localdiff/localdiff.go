@@ -1095,9 +1095,9 @@ func (m Model) KeyBindings() []uictx.KeyBinding {
 		{Key: "J / K", Description: "Extend selection range"},
 		{Key: "h / l", Description: "Focus left / right pane"},
 		{Key: "f", Description: "Toggle tree focus"},
-		{Key: "ctrl+j / k", Description: "Previous / next file"},
-		{Key: "ctrl+d / u", Description: "Scroll half page down / up"},
-		{Key: "ctrl+f / b", Description: "Scroll full page down / up"},
+		{Key: "^j / k", Description: "Previous / next file"},
+		{Key: "^d / u", Description: "Scroll half page down / up"},
+		{Key: "^f / b", Description: "Scroll full page down / up"},
 		{Key: "g g", Description: "Go to top"},
 		{Key: "G", Description: "Go to bottom"},
 		{Key: "m", Description: "Cycle diff mode (working/staged/branch)", Keywords: []string{"toggle"}},
@@ -1126,7 +1126,7 @@ func (m Model) StatusHints() (left, right []string) {
 		left = append(left, styles.StatusBarKey.Render("f")+" "+styles.StatusBarHint.Render("focus tree"))
 	}
 	left = append(left, styles.StatusBarKey.Render("h/l")+" "+styles.StatusBarHint.Render("panes"))
-	left = append(left, styles.StatusBarKey.Render("ctrl+j/k")+" "+styles.StatusBarHint.Render("files"))
+	left = append(left, styles.StatusBarKey.Render("^j/k")+" "+styles.StatusBarHint.Render("files"))
 	if !m.dv.Tree.Focused && m.dv.CurrentFileIdx >= 0 {
 		left = append(left, styles.StatusBarKey.Render("J/K")+" "+styles.StatusBarHint.Render("select range"))
 		if m.dv.ThreadCursor > 0 {
@@ -1183,7 +1183,7 @@ func (m Model) renderLayout(rightView string) string {
 		PR:           m.branchData.pr,
 		HelpMode:     m.ctx.Config.HelpMode,
 		ModeShortcut: "m",
-		HelpLine:     m.dv.HelpLine,
+		HelpLine:     m.helpLine(),
 	}
 	return m.dv.RenderLayout(rightView, rightTitle, info)
 }
@@ -1313,7 +1313,7 @@ func (m Model) helpLine() string {
 	hint := func(key, desc string) string {
 		return styles.StatusBarKey.Render(key) + " " + styles.StatusBarHint.Render(desc)
 	}
-	sep := styles.StatusBarHint.Render("  ")
+	sep := "  "
 
 	var parts []string
 
@@ -1339,15 +1339,21 @@ func (m Model) helpLine() string {
 	if m.dv.Tree.Focused {
 		parts = append(parts,
 			hint("j/k", "navigate"),
-			hint("enter", "open file"),
 			hint("l", "focus diff"),
-			hint("ctrl+j/k", "next/prev file"),
+			hint("^j/k", "next/prev file"),
 		)
+		switch m.mode {
+		case git.DiffWorking:
+			parts = append(parts, hint("s", "stage file"))
+		case git.DiffStaged:
+			parts = append(parts, hint("u", "unstage file"))
+		}
+		parts = append(parts, hint("↵", "open file"))
 	} else if m.dv.CurrentFileIdx >= 0 && m.dv.HasDiffLines() {
 		parts = append(parts,
 			hint("j/k", "navigate"),
 			hint("J/K", "select range"),
-			hint("ctrl+j/k", "next/prev file"),
+			hint("^j/k", "next/prev file"),
 		)
 		switch m.mode {
 		case git.DiffWorking:
@@ -1355,7 +1361,7 @@ func (m Model) helpLine() string {
 		case git.DiffStaged:
 			parts = append(parts, hint("u", "unstage line"), hint("U", "unstage hunk"))
 		}
-		parts = append(parts, hint("a", "comment"))
+		parts = append(parts, hint("↵", "comment"))
 		if m.cursorHasThread() {
 			parts = append(parts, hint("r", "reply"), hint("x", "resolve"))
 		}
@@ -1363,7 +1369,7 @@ func (m Model) helpLine() string {
 		parts = append(parts,
 			hint("j/k", "navigate tree"),
 			hint("enter", "open file"),
-			hint("ctrl+j/k", "next/prev file"),
+			hint("^j/k", "next/prev file"),
 		)
 	}
 	return strings.Join(parts, sep)

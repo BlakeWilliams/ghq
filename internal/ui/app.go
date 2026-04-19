@@ -370,7 +370,7 @@ func (m Model) View() tea.View {
 	if barActive {
 		var bar string
 		if m.quitPending {
-			bar = styles.StatusBarKey.Render("Press ctrl+c again to quit")
+			bar = styles.StatusBarKey.Render("Press ^c again to quit")
 		} else {
 			bar = m.commandBar.View()
 		}
@@ -593,9 +593,9 @@ func (m Model) helpPickerItems() []picker.Item {
 	items := []picker.Item{
 		{Label: ":", Description: "Open command picker", Keywords: []string{"command", "menu"}},
 		{Label: "?", Description: "Open help", Keywords: []string{"keybindings", "shortcuts"}},
-		{Label: "ctrl+p", Description: "Fuzzy find a file in the sidebar", Keywords: []string{"file", "find", "fuzzy", "open"}},
+		{Label: "^p", Description: "Fuzzy find a file in the sidebar", Keywords: []string{"file", "find", "fuzzy", "open"}},
 		{Label: "C", Description: "Copilot chat", Keywords: []string{"ai", "copilot"}},
-		{Label: "ctrl+c", Description: "Quit"},
+		{Label: "^c", Description: "Quit"},
 	}
 
 	// View-specific keys from the view itself.

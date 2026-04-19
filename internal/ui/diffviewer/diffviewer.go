@@ -41,7 +41,7 @@ type LayoutInfo struct {
 // the right-pane viewport.
 func (i LayoutInfo) helpFooterRows() int {
 	if i.HelpMode && i.HelpLine != "" {
-		return 1
+		return 2 // separator + help line
 	}
 	return 0
 }
@@ -164,7 +164,7 @@ func (d DiffViewer) ViewportHeight() int {
 // in the right pane.
 func (d DiffViewer) helpRowCount() int {
 	if d.HelpMode && d.HelpLine != "" {
-		return 1
+		return 2 // separator + help line
 	}
 	return 0
 }
@@ -840,7 +840,11 @@ func (d DiffViewer) RenderLayout(rightView string, rightTitle string, info Layou
 		rl := ""
 		contentW := innerRightW - 1 // -1 for scrollbar column
 		var scrollCol string
-		if helpRows > 0 && i >= contentH-helpRows {
+		if helpRows > 0 && i == contentH-helpRows {
+			// Separator row above the help line.
+			rl = chrome.Render(strings.Repeat("─", contentW))
+			scrollCol = " "
+		} else if helpRows > 0 && i > contentH-helpRows {
 			// Right-pane help footer row.
 			rl = renderHelpLine(info.HelpLine, contentW, dim)
 			scrollCol = " "

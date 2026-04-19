@@ -62,7 +62,8 @@ var (
 			Foreground(lipgloss.BrightBlack)
 
 	StatusBarKey = lipgloss.NewStyle().
-			Foreground(lipgloss.Magenta)
+			Foreground(lipgloss.Magenta).
+			Bold(true)
 
 	StatusBarHint = lipgloss.NewStyle().
 			Foreground(lipgloss.BrightBlack)

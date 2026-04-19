@@ -278,9 +278,9 @@ func (m Model) KeyBindings() []uictx.KeyBinding {
 		{Key: "J / K", Description: "Extend selection range"},
 		{Key: "h / l", Description: "Focus left / right pane"},
 		{Key: "f", Description: "Toggle tree focus"},
-		{Key: "ctrl+j / k", Description: "Previous / next file"},
-		{Key: "ctrl+d / u", Description: "Scroll half page down / up"},
-		{Key: "ctrl+f / b", Description: "Scroll full page down / up"},
+		{Key: "^j / k", Description: "Previous / next file"},
+		{Key: "^d / u", Description: "Scroll half page down / up"},
+		{Key: "^f / b", Description: "Scroll full page down / up"},
 		{Key: "g g", Description: "Go to top"},
 		{Key: "G", Description: "Go to bottom"},
 		{Key: "a", Description: "Add review comment"},
@@ -301,7 +301,7 @@ func (m Model) StatusHints() (left, right []string) {
 		left = append(left, styles.StatusBarKey.Render("f")+" "+styles.StatusBarHint.Render("focus tree"))
 	}
 	left = append(left, styles.StatusBarKey.Render("h/l")+" "+styles.StatusBarHint.Render("panes"))
-	left = append(left, styles.StatusBarKey.Render("ctrl+j/k")+" "+styles.StatusBarHint.Render("files"))
+	left = append(left, styles.StatusBarKey.Render("^j/k")+" "+styles.StatusBarHint.Render("files"))
 	if !m.dv.Tree.Focused && m.dv.CurrentFileIdx >= 0 {
 		left = append(left, styles.StatusBarKey.Render("J/K")+" "+styles.StatusBarHint.Render("select range"))
 	}
@@ -1210,7 +1210,7 @@ func (m Model) renderCommentBox() string {
 	}
 	boxLines = append(boxLines, indent+bottomRule)
 
-	leftHint := "esc cancel · ctrl+g $EDITOR"
+	leftHint := "esc cancel · ^g $EDITOR"
 	if m.canSuggest() {
 		leftHint += " · alt+s suggest"
 	}
@@ -1418,7 +1418,7 @@ func (m Model) helpLine() string {
 	hint := func(key, desc string) string {
 		return styles.StatusBarKey.Render(key) + " " + styles.StatusBarHint.Render(desc)
 	}
-	sep := styles.StatusBarHint.Render("  ")
+	sep := "  "
 
 	var parts []string
 	if m.dv.Composing {
@@ -1426,7 +1426,7 @@ func (m Model) helpLine() string {
 			hint("esc", "cancel"),
 			hint("enter", "submit local"),
 			hint("alt+enter", "submit to GitHub"),
-			hint("ctrl+g", "$EDITOR"),
+			hint("^g", "$EDITOR"),
 		)
 		return strings.Join(parts, sep)
 	}
@@ -1442,14 +1442,14 @@ func (m Model) helpLine() string {
 			hint("j/k", "navigate"),
 			hint("enter", "open file"),
 			hint("l", "focus diff"),
-			hint("ctrl+j/k", "next/prev file"),
+			hint("^j/k", "next/prev file"),
 		)
 	} else if m.dv.CurrentFileIdx >= 0 && m.dv.HasDiffLines() {
 		parts = append(parts,
 			hint("j/k", "navigate"),
 			hint("J/K", "select range"),
 			hint("a", "comment"),
-			hint("ctrl+j/k", "next/prev file"),
+			hint("^j/k", "next/prev file"),
 			hint("c/r/s", "comments/reviews/checks"),
 		)
 	} else {

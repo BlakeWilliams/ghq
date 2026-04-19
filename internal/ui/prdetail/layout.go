@@ -24,7 +24,7 @@ func (m Model) View() string {
 	// Compose: tree | divider | right panel.
 	view := m.dv.RenderLayout(rightView, rightTitle, diffviewer.LayoutInfo{
 		HelpMode: m.ctx.Config.HelpMode,
-		HelpLine: m.dv.HelpLine,
+		HelpLine: m.helpLine(),
 	})
 
 	// Modal overlay on top.

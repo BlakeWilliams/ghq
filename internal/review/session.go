@@ -26,9 +26,8 @@ type File struct {
 	Highlighted *components.HighlightedDiff
 
 	// Rendering (cheap, width-dependent, rebuilt on resize/reformat).
-	Rendered         string
-	DiffOffsets      []int
-	CommentPositions []components.CommentPosition
+	Rendered    string
+	DiffOffsets []int
 
 	// Comments on this file.
 	GitHubComments []github.ReviewComment
@@ -111,7 +110,6 @@ func (s *Session) SetFiles(prf []github.PullRequestFile) {
 			rf.Highlighted = old.Highlighted
 			rf.Rendered = old.Rendered
 			rf.DiffOffsets = old.DiffOffsets
-			rf.CommentPositions = old.CommentPositions
 		}
 
 		// Preserve local comments (they're keyed by path).
@@ -188,7 +186,6 @@ func (s *Session) FormatFile(path string, width int, colors styles.DiffColors, o
 
 	f.Rendered = list.String(rc)
 	f.DiffOffsets = list.DiffLineOffsets(len(diffLines), rc)
-	f.CommentPositions = list.CommentPositions(rc)
 }
 
 // RemoveFile removes a file from the session.

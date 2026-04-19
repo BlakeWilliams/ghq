@@ -68,12 +68,12 @@ var (
 	borderStyle   = lipgloss.NewStyle().Foreground(lipgloss.BrightBlack)
 )
 
-// CommentPosition records the rendered line offset for a comment in a thread.
+// CommentPosition records the location of a comment in a thread.
 type CommentPosition struct {
-	Line   int    // diff line number (source)
-	Side   string // "LEFT" or "RIGHT"
-	Idx    int    // 0-based index within the thread
-	Offset int    // rendered line index where this comment's header starts
+	Line      int    // diff line number (source)
+	Side      string // "LEFT" or "RIGHT"
+	Idx       int    // 0-based index within the thread
+	CommentID int    // comment ID for read/unread tracking
 }
 
 // HighlightedDiff holds pre-highlighted diff data that is width-independent.
@@ -169,45 +169,60 @@ func BuildRenderList(diffLines []DiffLine, comments []github.ReviewComment, opts
 		opt = opts[0]
 	}
 
+	placed := make(map[commentKey]bool)
+
+	// Helper: try to place a thread for a given key after diff line i.
+	tryPlace := func(items []Renderable, i int, ck commentKey, parentLT LineType) []Renderable {
+		if ck.Line <= 0 || placed[ck] {
+			return items
+		}
+		rendered := renderThread(ck, commentsByLine, opt)
+		if len(rendered) == 0 {
+			return items
+		}
+		placed[ck] = true
+		ct := NewCommentThreadItem(i, ck.Side, ck.Line, rendered, parentLT)
+		ct.Highlighted = ck.Line == opt.HighlightThreadLine && ck.Side == opt.HighlightThreadSide
+		if ct.Highlighted {
+			ct.HlIdx = opt.HighlightCommentIndex
+		}
+		return append(items, ct)
+	}
+
 	items := make([]Renderable, 0, len(diffLines))
 	for i := range diffLines {
 		dl := &diffLines[i]
 		items = append(items, NewDiffLineItem(i, dl))
 
-		var ck commentKey
-		if dl.Type == LineDel {
-			ck = commentKey{Side: "LEFT", Line: dl.OldLineNo}
-		} else {
-			ck = commentKey{Side: "RIGHT", Line: dl.NewLineNo}
-		}
-		if ck.Line > 0 {
-			pk := CommentKey{Side: ck.Side, Line: ck.Line}
-
-			// Get base thread comments: prefer pre-built RenderComments if available.
-			var rendered []RenderComment
-			if opt.ThreadedComments != nil {
-				rendered = opt.ThreadedComments[pk]
-			} else if threadComments, ok := commentsByLine[ck]; ok {
-				rendered = ReviewCommentsToRender(threadComments)
-			}
-
-			// Append pending (streaming) comments.
-			if pending := opt.PendingComments[pk]; len(pending) > 0 {
-				rendered = append(rendered, pending...)
-			}
-
-			if len(rendered) > 0 {
-				ct := NewCommentThreadItem(i, ck.Side, ck.Line, rendered, dl.Type)
-				ct.Highlighted = ck.Line == opt.HighlightThreadLine && ck.Side == opt.HighlightThreadSide
-				if ct.Highlighted {
-					ct.HlIdx = opt.HighlightCommentIndex
-				}
-				items = append(items, ct)
-			}
+		switch dl.Type {
+		case LineDel:
+			items = tryPlace(items, i, commentKey{Side: "LEFT", Line: dl.OldLineNo}, dl.Type)
+		case LineContext:
+			// Context lines carry both old and new numbers — check both sides.
+			items = tryPlace(items, i, commentKey{Side: "RIGHT", Line: dl.NewLineNo}, dl.Type)
+			items = tryPlace(items, i, commentKey{Side: "LEFT", Line: dl.OldLineNo}, dl.Type)
+		default:
+			items = tryPlace(items, i, commentKey{Side: "RIGHT", Line: dl.NewLineNo}, dl.Type)
 		}
 	}
 
 	return &FileRenderList{Items: items, dirty: true}
+}
+
+// renderThread builds the RenderComment slice for a given key,
+// merging base + pending comments.
+func renderThread(ck commentKey, commentsByLine map[commentKey][]github.ReviewComment, opt DiffFormatOptions) []RenderComment {
+	pk := CommentKey{Side: ck.Side, Line: ck.Line}
+	var rendered []RenderComment
+	if opt.ThreadedComments != nil {
+		rendered = opt.ThreadedComments[pk]
+	} else if threadComments, ok := commentsByLine[ck]; ok {
+		rendered = ReviewCommentsToRender(threadComments)
+	}
+	if pending := opt.PendingComments[pk]; len(pending) > 0 {
+		rendered = append(rendered, pending...)
+	}
+	return rendered
 }
 
 // CommentsForThread returns the comments that form the thread at the given side+line.
@@ -230,6 +245,7 @@ func BuildThreadedRenderComments(comments []github.ReviewComment, blockLookup ma
 		for i, c := range threadComments {
 			if blocks, ok := blockLookup[c.ID]; ok && len(blocks) > 0 {
 				rendered[i] = RenderComment{
+					ID:        c.ID,
 					Author:    c.User.Login,
 					CreatedAt: c.CreatedAt,
 					Blocks:    blocks,

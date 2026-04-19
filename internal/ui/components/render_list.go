@@ -22,6 +22,7 @@ type RenderContext struct {
 // Both github.ReviewComment (API) and comments.LocalComment (local) convert
 // to this type at the rendering boundary.
 type RenderComment struct {
+	ID        int
 	Author    string
 	CreatedAt time.Time
 	Blocks    []comments.ContentBlock
@@ -31,6 +32,7 @@ type RenderComment struct {
 // RenderComment by wrapping the body as a single TextBlock.
 func ReviewCommentToRender(c github.ReviewComment) RenderComment {
 	return RenderComment{
+		ID:        c.ID,
 		Author:    c.User.Login,
 		CreatedAt: c.CreatedAt,
 		Blocks:    []comments.ContentBlock{comments.TextBlock{Text: c.Body}},
@@ -375,28 +377,58 @@ func (f *FileRenderList) ThreadEndOffset(side string, line int, rc RenderContext
 	return -1
 }
 
-// CommentPositions returns a CommentPosition for each individual comment
-// across all threads, with correct visual-line offsets.
 func (f *FileRenderList) CommentPositions(rc RenderContext) []CommentPosition {
 	var positions []CommentPosition
-	offset := 0
 	for _, item := range f.Items {
 		if ct, ok := item.(*CommentThreadItem); ok && len(ct.Comments) > 0 {
-			// Ensure the thread is rendered so commentLines is populated.
+			for ci := range ct.Comments {
+				commentID := 0
+				if ci < len(ct.Comments) {
+					commentID = ct.Comments[ci].ID
+				}
+				positions = append(positions, CommentPosition{
+					Line:      ct.Line,
+					Side:      ct.Side,
+					Idx:       ci,
+					CommentID: commentID,
+				})
+			}
+		}
+	}
+	return positions
+}
+
+// ThreadCommentCount returns the number of comments in the thread at (side, line).
+func (f *FileRenderList) ThreadCommentCount(side string, line int) int {
+	for _, item := range f.Items {
+		if ct, ok := item.(*CommentThreadItem); ok && ct.Side == side && ct.Line == line {
+			return len(ct.Comments)
+		}
+	}
+	return 0
+}
+
+// ThreadCommentOffset returns the rendered line offset and height of the Nth
+// comment (0-based) in the thread at (side, line). Returns (-1, 0) if not found.
+func (f *FileRenderList) ThreadCommentOffset(side string, line int, commentIdx int, rc RenderContext) (offset, height int) {
+	runningOffset := 0
+	for _, item := range f.Items {
+		if ct, ok := item.(*CommentThreadItem); ok && ct.Side == side && ct.Line == line {
 			ct.Render(rc)
+			if commentIdx < 0 || commentIdx >= len(ct.commentLines) {
+				return -1, 0
+			}
 			// Thread layout: blank line, then per-comment blocks.
 			lineInThread := 1 // skip blank line above
 			for ci, cl := range ct.commentLines {
-				positions = append(positions, CommentPosition{
-					Line:   ct.Line,
-					Side:   ct.Side,
-					Idx:    ci,
-					Offset: offset + lineInThread,
-				})
+				if ci == commentIdx {
+					return runningOffset + lineInThread, cl
+				}
 				lineInThread += cl
 			}
+			return -1, 0
 		}
-		offset += item.RenderedLineCount(rc)
+		runningOffset += item.RenderedLineCount(rc)
 	}
-	return positions
+	return -1, 0
 }

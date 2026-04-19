@@ -39,6 +39,20 @@ func (cs *CopilotState) ClearPending(commentID string) {
 	delete(cs.Pending, commentID)
 }
 
+// CancelPendingAt cancels any pending Copilot reply at the given file/side/line.
+// Returns the comment ID that was cancelled, or "" if none found.
+func (cs *CopilotState) CancelPendingAt(path, side string, line int) string {
+	for id, info := range cs.Pending {
+		if info.Path == path && info.Side == side && info.Line == line {
+			delete(cs.Pending, id)
+			delete(cs.ReplyBuf, id)
+			delete(cs.Intent, id)
+			return id
+		}
+	}
+	return ""
+}
+
 // HasPending returns true if there are any pending Copilot sessions.
 func (cs CopilotState) HasPending() bool {
 	return len(cs.Pending) > 0
@@ -48,6 +62,16 @@ func (cs CopilotState) HasPending() bool {
 func (cs CopilotState) IsPending(commentID string) bool {
 	_, ok := cs.Pending[commentID]
 	return ok
+}
+
+// IsPendingAt returns true if there's a pending Copilot reply at the given file/side/line.
+func (cs CopilotState) IsPendingAt(path, side string, line int) bool {
+	for _, info := range cs.Pending {
+		if info.Path == path && info.Side == side && info.Line == line {
+			return true
+		}
+	}
+	return false
 }
 
 // PendingPath returns the path of a pending Copilot session, or "".

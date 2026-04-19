@@ -646,6 +646,22 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 			}
 		}
 		m.rebuildContentIfChanged()
+
+		// Clamp ThreadCursor if the thread shrank (e.g. copilot reply completed/errored).
+		if m.dv.ThreadCursor > 0 {
+			count := m.threadCommentCount()
+			if count == 0 {
+				m.dv.ThreadCursor = 0
+			} else if m.dv.ThreadCursor > count {
+				m.dv.ThreadCursor = count
+			}
+		}
+
+		// Auto-scroll if the user is focused on a streaming copilot comment.
+		if m.dv.ThreadCursor > 0 && m.focusedOnCopilotPending() {
+			m.scrollToThreadCursorBottom()
+		}
+
 		if m.dv.CopilotState.HasPending() {
 			return m, tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg {
 				return copilotTickMsg{}
@@ -723,6 +739,12 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 				m.updateThreadHighlight()
 				m.rebuildContent()
 				m.scrollToThreadCursor()
+			} else {
+				// Past last comment → exit thread, advance to next diff line.
+				m.updateThreadHighlight() // remove highlight
+				m.dv.ThreadCursor = 0
+				m.dv.MoveDiffCursor(1)
+				m.rebuildContent()
 			}
 			return m, nil, true
 		case "k", "up":
@@ -750,6 +772,10 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 			m.dv.VP.SetYOffset(m.dv.VP.YOffset() - m.dv.Height/2)
 			return m, nil, true
 		case "esc":
+			// If focused on a copilot pending comment, cancel it.
+			if m.focusedOnCopilotPending() {
+				m.cancelFocusedCopilotReply()
+			}
 			m.updateThreadHighlight() // remove highlight
 			m.dv.ThreadCursor = 0
 			m.rebuildContent()
@@ -818,6 +844,25 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 		cmd := m.selectTreeEntry()
 		return m, cmd, true
 	case "j", "down", "k", "up", "J", "shift+down", "K", "shift+up":
+		// Thread-aware j/k: enter threads naturally during navigation.
+		// J/K (shift) always bypasses threads for range selection.
+		if !m.dv.Tree.Focused && m.dv.CurrentFileIdx >= 0 && m.dv.HasDiffLines() {
+			switch msg.String() {
+			case "j", "down":
+				if m.diffLineHasThread(m.dv.DiffCursor) {
+					m.enterThread(1)
+					return m, nil, true
+				}
+			case "k", "up":
+				prevIdx := m.prevNonHunkLine(m.dv.DiffCursor)
+				if prevIdx >= 0 && m.diffLineHasThread(prevIdx) {
+					m.dv.DiffCursor = prevIdx
+					count := m.threadCommentCountAt(prevIdx)
+					m.enterThread(count)
+					return m, nil, true
+				}
+			}
+		}
 		if m.dv.HandleNavKey(msg.String()) == diffviewer.KeyHandled {
 			return m, nil, true
 		}
@@ -836,12 +881,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 			return m, nil, true
 		}
 		// If on a line with comments, enter thread navigation.
-		if m.dv.CurrentFileIdx >= 0 && m.dv.HasDiffLines() && m.cursorHasThread() {
-			m.dv.ThreadCursor = 1
-			m.updateThreadHighlight() // add highlight
-			m.rebuildContent()
-			m.scrollToThreadCursor()
-			m.markCurrentThreadRead()
+		if m.dv.CurrentFileIdx >= 0 && m.dv.HasDiffLines() && m.diffLineHasThread(m.dv.DiffCursor) {
+			m.enterThread(1)
 			return m, nil, true
 		}
 		// Otherwise open comment input.
@@ -1523,6 +1564,112 @@ func (m Model) threadCommentCount() int {
 		return 0
 	}
 	return m.dv.FileRenderLists[idx].ThreadCommentCount(side, line)
+}
+
+// threadInfoForDiffLine returns the line number and side for a comment thread
+// at the given diff line index (like cursorThreadInfo but for any diff line).
+func (m Model) threadInfoForDiffLine(diffLineIdx int) (line int, side string, ok bool) {
+	idx := m.dv.CurrentFileIdx
+	if idx < 0 || idx >= len(m.dv.FileDiffs) || diffLineIdx < 0 || diffLineIdx >= len(m.dv.FileDiffs[idx]) {
+		return
+	}
+	dl := m.dv.FileDiffs[idx][diffLineIdx]
+	if dl.Type == components.LineHunk {
+		return
+	}
+	if dl.Type == components.LineDel {
+		return dl.OldLineNo, "LEFT", true
+	}
+	return dl.NewLineNo, "RIGHT", true
+}
+
+// diffLineHasThread checks if the diff line at diffLineIdx has a rendered
+// comment thread (including copilot pending comments).
+func (m Model) diffLineHasThread(diffLineIdx int) bool {
+	line, side, ok := m.threadInfoForDiffLine(diffLineIdx)
+	if !ok {
+		return false
+	}
+	idx := m.dv.CurrentFileIdx
+	if idx < 0 || idx >= len(m.dv.FileRenderLists) || m.dv.FileRenderLists[idx] == nil {
+		return false
+	}
+	return m.dv.FileRenderLists[idx].FindThread(side, line) >= 0
+}
+
+// threadCommentCountAt returns the number of comments in the thread at the
+// given diff line index.
+func (m Model) threadCommentCountAt(diffLineIdx int) int {
+	line, side, ok := m.threadInfoForDiffLine(diffLineIdx)
+	if !ok {
+		return 0
+	}
+	idx := m.dv.CurrentFileIdx
+	if idx < 0 || idx >= len(m.dv.FileRenderLists) || m.dv.FileRenderLists[idx] == nil {
+		return 0
+	}
+	return m.dv.FileRenderLists[idx].ThreadCommentCount(side, line)
+}
+
+// prevNonHunkLine finds the previous non-hunk diff line before fromIdx.
+// Returns -1 if none found.
+func (m Model) prevNonHunkLine(fromIdx int) int {
+	idx := m.dv.CurrentFileIdx
+	if idx < 0 || idx >= len(m.dv.FileDiffs) {
+		return -1
+	}
+	lines := m.dv.FileDiffs[idx]
+	for i := fromIdx - 1; i >= 0; i-- {
+		if lines[i].Type != components.LineHunk {
+			return i
+		}
+	}
+	return -1
+}
+
+// enterThread sets up thread navigation at the given comment index (1-based).
+// Handles highlighting, rebuilding content, scrolling, and marking read.
+func (m *Model) enterThread(commentIdx int) {
+	m.dv.SelectionAnchor = -1
+	m.dv.ThreadCursor = commentIdx
+	m.updateThreadHighlight()
+	m.rebuildContent()
+	if commentIdx <= 1 {
+		m.scrollToThreadCursor()
+	} else {
+		m.scrollToThreadCursorBottom()
+	}
+	m.markCurrentThreadRead()
+}
+
+// focusedOnCopilotPending returns true if the user's thread cursor is on a
+// comment thread that has an active copilot pending reply.
+func (m Model) focusedOnCopilotPending() bool {
+	_, line, side, ok := m.cursorThreadInfo()
+	if !ok {
+		return false
+	}
+	idx := m.dv.CurrentFileIdx
+	if idx < 0 || idx >= len(m.dv.Files) {
+		return false
+	}
+	return m.dv.CopilotState.IsPendingAt(m.dv.Files[idx].Filename, side, line)
+}
+
+// cancelFocusedCopilotReply cancels the copilot pending reply on the thread
+// at the current cursor. Clears pending state and re-splices the thread.
+func (m *Model) cancelFocusedCopilotReply() {
+	_, line, side, ok := m.cursorThreadInfo()
+	if !ok {
+		return
+	}
+	idx := m.dv.CurrentFileIdx
+	if idx < 0 || idx >= len(m.dv.Files) {
+		return
+	}
+	path := m.dv.Files[idx].Filename
+	m.dv.CopilotState.CancelPendingAt(path, side, line)
+	m.dv.SpliceThreadForComment(idx, side, line)
 }
 
 const scrollMargin = 5

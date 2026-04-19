@@ -46,6 +46,22 @@
   CopilotPending map[string]CopilotPendingInfo
   ```
 
+## Testing
+
+- **DO** use `assert` and `require` from `github.com/stretchr/testify` for all test assertions.
+- **DON'T** use `t.Errorf`, `t.Fatalf`, `t.Error`, `t.Fatal`, or manual `if`-then-fail patterns. Use `assert.*` (continues on failure) or `require.*` (stops on failure) instead.
+
+  ```
+  // Bad
+  if got != want {
+      t.Errorf("got %d, want %d", got, want)
+  }
+
+  // Good
+  assert.Equal(t, want, got)
+  require.NoError(t, err)
+  ```
+
 ## ANSI String Manipulation
 
 - **BEWARE** every `\033[0m` reset kills the current background color. When composing styled content with nested ANSI sequences (e.g. tool group rows inside comment thread borders), re-inject the background escape after each reset.

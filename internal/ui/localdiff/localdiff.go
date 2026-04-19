@@ -671,8 +671,9 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 		}
 
 		// Auto-scroll if the user is focused on a streaming copilot comment.
+		// Use extra padding so there's breathing room below the growing thread.
 		if m.dv.ThreadCursor > 0 && m.focusedOnCopilotPending() {
-			m.scrollToThreadCursorBottom()
+			m.scrollCopilotFollow()
 		}
 
 		if m.dv.CopilotState.HasPending() {
@@ -2054,6 +2055,27 @@ func (m *Model) scrollToThreadCursorBottom() {
 		if commentH <= vpH-scrollMargin*2 {
 			m.scrollToThreadCursor()
 		}
+	}
+}
+
+// copilotFollowPadding is the minimum number of blank lines kept visible
+// below a streaming copilot reply so the thread doesn't hug the viewport edge.
+const copilotFollowPadding = 4
+
+// scrollCopilotFollow keeps the bottom of a streaming copilot comment visible
+// with extra padding below the thread (border + blank + breathing room).
+func (m *Model) scrollCopilotFollow() {
+	_, end := m.currentCommentRange()
+	if end < 0 {
+		return
+	}
+	// Account for the thread's bottom border + trailing blank line,
+	// plus padding so there's visible context below.
+	padded := end + 2 + copilotFollowPadding
+	vpH := m.dv.ViewportHeight()
+	bottom := m.dv.VP.YOffset() + vpH - 1
+	if padded > bottom {
+		m.dv.VP.SetYOffset(padded - vpH + 1)
 	}
 }
 

@@ -3,7 +3,7 @@ package inbox
 import (
 	"testing"
 
-	"github.com/blakewilliams/ghq/internal/github"
+	"github.com/blakewilliams/gg/internal/github"
 )
 
 func inboxPR(number int, action github.ActionReason) github.InboxPR {

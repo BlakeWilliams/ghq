@@ -3,8 +3,8 @@ package review
 import (
 	"strings"
 
-	"github.com/blakewilliams/ghq/internal/github"
-	"github.com/blakewilliams/ghq/internal/ui/components"
+	"github.com/blakewilliams/gg/internal/github"
+	"github.com/blakewilliams/gg/internal/ui/components"
 )
 
 // AnchorResult describes where a PR comment maps to in a local diff.

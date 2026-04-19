@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/blakewilliams/ghq/internal/ui/components"
+	"github.com/blakewilliams/gg/internal/ui/components"
 )
 
 func TestByteToVisual(t *testing.T) {

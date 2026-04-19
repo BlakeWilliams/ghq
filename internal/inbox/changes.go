@@ -1,7 +1,7 @@
 package inbox
 
 import (
-	"github.com/blakewilliams/ghq/internal/github"
+	"github.com/blakewilliams/gg/internal/github"
 )
 
 // Change describes a state transition for a PR.

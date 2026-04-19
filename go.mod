@@ -1,4 +1,4 @@
-module github.com/blakewilliams/ghq
+module github.com/blakewilliams/gg
 
 go 1.25.8
 

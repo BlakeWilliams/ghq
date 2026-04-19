@@ -4,8 +4,8 @@ import (
 	"crypto/sha256"
 	"fmt"
 
-	"github.com/blakewilliams/ghq/internal/git"
-	"github.com/blakewilliams/ghq/internal/cache/persist"
+	"github.com/blakewilliams/gg/internal/git"
+	"github.com/blakewilliams/gg/internal/cache/persist"
 )
 
 // ViewState persists the user's position in the local diff view.

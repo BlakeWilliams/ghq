@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/blakewilliams/ghq/internal/cache"
+	"github.com/blakewilliams/gg/internal/cache"
 )
 
 // CachedClient wraps a Client with TanStack Query-style caching.

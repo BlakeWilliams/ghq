@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/blakewilliams/ghq/internal/github"
+	"github.com/blakewilliams/gg/internal/github"
 )
 
 // DiffMode controls what git diff compares.

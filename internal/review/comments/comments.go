@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/blakewilliams/ghq/internal/cache/persist"
-	"github.com/blakewilliams/ghq/internal/github"
+	"github.com/blakewilliams/gg/internal/cache/persist"
+	"github.com/blakewilliams/gg/internal/github"
 )
 
 // LocalComment represents a comment on a local diff line.

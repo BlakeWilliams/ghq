@@ -4,9 +4,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/blakewilliams/ghq/internal/review/agents"
-	"github.com/blakewilliams/ghq/internal/review/comments"
-	"github.com/blakewilliams/ghq/internal/ui/components"
+	"github.com/blakewilliams/gg/internal/review/agents"
+	"github.com/blakewilliams/gg/internal/review/comments"
+	"github.com/blakewilliams/gg/internal/ui/components"
 )
 
 // CopilotState manages all copilot reply state for a DiffViewer.

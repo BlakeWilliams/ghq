@@ -9,9 +9,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/blakewilliams/ghq/internal/github"
-	"github.com/blakewilliams/ghq/internal/ui/components"
-	"github.com/blakewilliams/ghq/internal/ui/styles"
+	"github.com/blakewilliams/gg/internal/github"
+	"github.com/blakewilliams/gg/internal/ui/components"
+	"github.com/blakewilliams/gg/internal/ui/styles"
 )
 
 func testColors() styles.DiffColors {

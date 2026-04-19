@@ -7,7 +7,7 @@ import (
 	"charm.land/lipgloss/v2"
 	xansi "github.com/charmbracelet/x/ansi"
 
-	"github.com/blakewilliams/ghq/internal/ui/components"
+	"github.com/blakewilliams/gg/internal/ui/components"
 )
 
 // HandleSearchKey processes key events while the search popup is open.

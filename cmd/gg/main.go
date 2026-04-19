@@ -5,11 +5,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/blakewilliams/ghq/internal/cache"
-	"github.com/blakewilliams/ghq/internal/config"
-	"github.com/blakewilliams/ghq/internal/git"
-	"github.com/blakewilliams/ghq/internal/github"
-	"github.com/blakewilliams/ghq/internal/ui"
+	"github.com/blakewilliams/gg/internal/cache"
+	"github.com/blakewilliams/gg/internal/config"
+	"github.com/blakewilliams/gg/internal/git"
+	"github.com/blakewilliams/gg/internal/github"
+	"github.com/blakewilliams/gg/internal/ui"
 	"github.com/cli/go-gh/v2/pkg/repository"
 	tea "charm.land/bubbletea/v2"
 )

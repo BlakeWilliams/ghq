@@ -3,7 +3,7 @@ package components
 import (
 	"strings"
 
-	"github.com/blakewilliams/ghq/internal/ui/styles"
+	"github.com/blakewilliams/gg/internal/ui/styles"
 )
 
 func RenderTabs(tabs []string, activeIndex int) string {

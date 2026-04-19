@@ -6,9 +6,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/blakewilliams/ghq/internal/config"
-	"github.com/blakewilliams/ghq/internal/github"
-	"github.com/blakewilliams/ghq/internal/ui/styles"
+	"github.com/blakewilliams/gg/internal/config"
+	"github.com/blakewilliams/gg/internal/github"
+	"github.com/blakewilliams/gg/internal/ui/styles"
 )
 
 // QueryErrMsg is sent when a GitHub API query fails.

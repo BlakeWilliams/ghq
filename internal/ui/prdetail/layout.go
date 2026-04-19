@@ -1,6 +1,6 @@
 package prdetail
 
-import "github.com/blakewilliams/ghq/internal/ui/diffviewer"
+import "github.com/blakewilliams/gg/internal/ui/diffviewer"
 
 func (m Model) View() string {
 	if !m.dv.VPReady {

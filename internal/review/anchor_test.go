@@ -3,8 +3,8 @@ package review
 import (
 	"testing"
 
-	"github.com/blakewilliams/ghq/internal/github"
-	"github.com/blakewilliams/ghq/internal/ui/components"
+	"github.com/blakewilliams/gg/internal/github"
+	"github.com/blakewilliams/gg/internal/ui/components"
 )
 
 func intPtr(n int) *int { return &n }

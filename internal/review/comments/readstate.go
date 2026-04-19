@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/blakewilliams/ghq/internal/cache/persist"
+	"github.com/blakewilliams/gg/internal/cache/persist"
 )
 
 // ReadState tracks which comment threads have been read.

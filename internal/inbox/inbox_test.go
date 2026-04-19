@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blakewilliams/ghq/internal/github"
+	"github.com/blakewilliams/gg/internal/github"
 )
 
 func boolPtr(b bool) *bool     { return &b }

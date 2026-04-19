@@ -6,9 +6,9 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
-	"github.com/blakewilliams/ghq/internal/github"
-	"github.com/blakewilliams/ghq/internal/review/comments"
-	"github.com/blakewilliams/ghq/internal/ui/styles"
+	"github.com/blakewilliams/gg/internal/github"
+	"github.com/blakewilliams/gg/internal/review/comments"
+	"github.com/blakewilliams/gg/internal/ui/styles"
 )
 
 func testColors() styles.DiffColors {

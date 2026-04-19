@@ -5,7 +5,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/blakewilliams/ghq/internal/github"
+	"github.com/blakewilliams/gg/internal/github"
 )
 
 const (

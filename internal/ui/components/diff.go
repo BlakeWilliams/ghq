@@ -13,9 +13,9 @@ import (
 	chromastyles "github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/blakewilliams/ghq/internal/github"
-	"github.com/blakewilliams/ghq/internal/review/comments"
-	"github.com/blakewilliams/ghq/internal/ui/styles"
+	"github.com/blakewilliams/gg/internal/github"
+	"github.com/blakewilliams/gg/internal/review/comments"
+	"github.com/blakewilliams/gg/internal/ui/styles"
 )
 
 // LineType identifies the kind of diff line.

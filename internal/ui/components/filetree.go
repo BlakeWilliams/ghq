@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/blakewilliams/ghq/internal/github"
+	"github.com/blakewilliams/gg/internal/github"
 	"github.com/charmbracelet/x/ansi"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"

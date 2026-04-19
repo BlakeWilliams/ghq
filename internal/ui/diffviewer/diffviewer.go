@@ -12,11 +12,11 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	"charm.land/lipgloss/v2"
 
-	"github.com/blakewilliams/ghq/internal/github"
-	"github.com/blakewilliams/ghq/internal/review/agents"
-	"github.com/blakewilliams/ghq/internal/review/comments"
-	"github.com/blakewilliams/ghq/internal/ui/components"
-	"github.com/blakewilliams/ghq/internal/ui/uictx"
+	"github.com/blakewilliams/gg/internal/github"
+	"github.com/blakewilliams/gg/internal/review/agents"
+	"github.com/blakewilliams/gg/internal/review/comments"
+	"github.com/blakewilliams/gg/internal/ui/components"
+	"github.com/blakewilliams/gg/internal/ui/uictx"
 )
 
 const scrollMargin = 5

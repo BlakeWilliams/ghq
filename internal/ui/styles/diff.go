@@ -5,7 +5,7 @@ import (
 	"image/color"
 
 	"github.com/alecthomas/chroma/v2"
-	"github.com/blakewilliams/ghq/internal/terminal"
+	"github.com/blakewilliams/gg/internal/terminal"
 )
 
 // DiffColors holds pre-computed raw ANSI escape codes for diff line rendering.

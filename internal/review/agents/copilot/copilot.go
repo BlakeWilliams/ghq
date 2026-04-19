@@ -11,7 +11,7 @@ import (
 
 	sdk "github.com/github/copilot-sdk/go"
 
-	"github.com/blakewilliams/ghq/internal/review/agents"
+	"github.com/blakewilliams/gg/internal/review/agents"
 )
 
 // Client wraps the Copilot SDK for code review conversations.

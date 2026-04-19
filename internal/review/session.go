@@ -4,10 +4,10 @@
 package review
 
 import (
-	"github.com/blakewilliams/ghq/internal/review/comments"
-	"github.com/blakewilliams/ghq/internal/github"
-	"github.com/blakewilliams/ghq/internal/ui/components"
-	"github.com/blakewilliams/ghq/internal/ui/styles"
+	"github.com/blakewilliams/gg/internal/review/comments"
+	"github.com/blakewilliams/gg/internal/github"
+	"github.com/blakewilliams/gg/internal/ui/components"
+	"github.com/blakewilliams/gg/internal/ui/styles"
 )
 
 // File holds all data for a single file in a review.

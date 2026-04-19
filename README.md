@@ -10,14 +10,14 @@ Interactive local diffs. Review, stage, and polish your changes with agents. Thi
 ## Install
 
 ```
-go install github.com/blakewilliams/ghq/cmd/ghq@latest
+go install github.com/blakewilliams/ghq/cmd/gg@latest
 ```
 
 Requires Go 1.25+ and a GitHub token (via the `gh` CLI or `GITHUB_TOKEN` env var).
 
 ## Usage
 
-Just run `ghq` in a branch with changes.
+Just run `gg` in a branch with changes.
 
 **Navigation**
 

@@ -98,24 +98,40 @@ func (s *CommentStore) Add(c LocalComment) {
 	s.Save()
 }
 
-// ForFile returns non-resolved comments for a given file path as ReviewComments.
-// Note: blocks are lost in this conversion — use ForFileLocal for block-aware rendering.
-func (s *CommentStore) ForFile(path string) []github.ReviewComment {
-	// First pass: find resolved root IDs.
+// resolvedIDs returns the set of all comment IDs that belong to resolved threads.
+// Walks the full reply chain from resolved roots so nested replies are included.
+func (s *CommentStore) resolvedIDs() map[string]bool {
 	resolved := map[string]bool{}
 	for _, c := range s.Comments {
 		if c.Resolved && c.InReplyToID == "" {
 			resolved[c.ID] = true
 		}
 	}
+	// Propagate to all descendants.
+	changed := true
+	for changed {
+		changed = false
+		for _, c := range s.Comments {
+			if !resolved[c.ID] && resolved[c.InReplyToID] {
+				resolved[c.ID] = true
+				changed = true
+			}
+		}
+	}
+	return resolved
+}
+
+// ForFile returns non-resolved comments for a given file path as ReviewComments.
+// Note: blocks are lost in this conversion — use ForFileLocal for block-aware rendering.
+func (s *CommentStore) ForFile(path string) []github.ReviewComment {
+	resolved := s.resolvedIDs()
 
 	var result []github.ReviewComment
 	for _, c := range s.Comments {
 		if c.Path != path {
 			continue
 		}
-		// Skip if this comment or its thread root is resolved.
-		if c.Resolved || resolved[c.InReplyToID] {
+		if resolved[c.ID] {
 			continue
 		}
 		result = append(result, c.ToReviewComment())
@@ -126,19 +142,14 @@ func (s *CommentStore) ForFile(path string) []github.ReviewComment {
 // ForFileLocal returns non-resolved LocalComments for a given file path,
 // preserving block data for rendering.
 func (s *CommentStore) ForFileLocal(path string) []LocalComment {
-	resolved := map[string]bool{}
-	for _, c := range s.Comments {
-		if c.Resolved && c.InReplyToID == "" {
-			resolved[c.ID] = true
-		}
-	}
+	resolved := s.resolvedIDs()
 
 	var result []LocalComment
 	for _, c := range s.Comments {
 		if c.Path != path {
 			continue
 		}
-		if c.Resolved || resolved[c.InReplyToID] {
+		if resolved[c.ID] {
 			continue
 		}
 		result = append(result, c)
@@ -166,10 +177,23 @@ func (s *CommentStore) FindThreadRoot(path string, line int, side string) string
 	return ""
 }
 
-// Resolve toggles the resolved state of all comments in a thread.
+// Resolve toggles the resolved state of all comments in a thread,
+// walking the full reply chain (not just direct children of root).
 func (s *CommentStore) Resolve(rootID string, resolved bool) {
+	// Collect all IDs in the thread via breadth-first walk.
+	threadIDs := map[string]bool{rootID: true}
+	changed := true
+	for changed {
+		changed = false
+		for _, c := range s.Comments {
+			if !threadIDs[c.ID] && threadIDs[c.InReplyToID] {
+				threadIDs[c.ID] = true
+				changed = true
+			}
+		}
+	}
 	for i := range s.Comments {
-		if s.Comments[i].ID == rootID || s.Comments[i].InReplyToID == rootID {
+		if threadIDs[s.Comments[i].ID] {
 			s.Comments[i].Resolved = resolved
 		}
 	}

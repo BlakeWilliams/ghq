@@ -16,6 +16,7 @@ import (
 	"github.com/blakewilliams/gg/internal/review/agents/copilot"
 	"github.com/blakewilliams/gg/internal/ui/chat"
 	"github.com/blakewilliams/gg/internal/ui/commandbar"
+	"github.com/blakewilliams/gg/internal/ui/commit"
 	"github.com/blakewilliams/gg/internal/ui/localdiff"
 	"github.com/blakewilliams/gg/internal/ui/picker"
 	"github.com/blakewilliams/gg/internal/ui/styles"
@@ -67,6 +68,7 @@ const (
 	modeCommand
 	modePicker
 	modeCopilotChat
+	modeCommit
 )
 
 const chromeHeight = 0 // no status bar — info is in the layout header/footer
@@ -81,6 +83,7 @@ type Model struct {
 	copilotChat    chat.Model
 	chatClient     *agents.Client
 	chatInitialized bool
+	commitModel    commit.Model
 	ctx         *uictx.Context
 	quitPending bool // true after first ctrl+c
 	palette     terminal.Palette
@@ -263,6 +266,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
+		// Commit mode owns all input.
+		if m.mode == modeCommit {
+			var cmd tea.Cmd
+			m.commitModel, cmd = m.commitModel.Update(msg)
+			return m, cmd
+		}
+
 		// Delegate to active view first.
 		view, cmd, handled := m.activeView.HandleKey(msg)
 		if handled {
@@ -293,12 +303,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "`":
 			return m.openCopilotChat()
+		case "C":
+			if m.repoRoot == "" {
+				return m, nil
+			}
+			if !git.HasStagedChanges(m.repoRoot) {
+				return m, nil
+			}
+			m.mode = modePicker
+			m.pickerKind = "commit"
+			m.picker = picker.New("Commit", m.commitPickerItems(), m.pickerInnerWidth(), m.height-chromeHeight)
+			return m, nil
 		}
 
 	case picker.ResultMsg:
 		kind := m.pickerKind
 		m.mode = modeNormal
 		m.pickerKind = ""
+
+		if kind == "commit" {
+			if !msg.Selected || msg.Value == "" {
+				return m, nil
+			}
+			return m.openCommitFlow(msg.Value)
+		}
 
 		if kind == "file" {
 			if !msg.Selected || msg.Value == "" {
@@ -326,18 +354,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mode = modeNormal
 		return m, nil
 
+	case commit.DoneMsg:
+		m.mode = modeNormal
+		// Refresh the active view to reflect the committed changes.
+		var cmd tea.Cmd
+		m.activeView, cmd = m.activeView.Update(commandbar.CommandMsg{Command: "refresh"})
+		return m, cmd
+
+	case commit.CancelMsg:
+		m.mode = modeNormal
+		return m, nil
+
+	case commit.ErrorMsg:
+		m.mode = modeNormal
+		return m, nil
+
 	case userLoadedMsg:
 		m.ctx.Username = msg.User.Login
 		return m, m.activeView.Init()
 	}
 
-	// Forward non-key messages to active view (and copilot chat if open).
+	// Forward non-key messages to active view (and copilot chat/commit if open).
 	var cmd tea.Cmd
 	m.activeView, cmd = m.activeView.Update(msg)
 	if m.mode == modeCopilotChat {
 		var chatCmd tea.Cmd
 		m.copilotChat, chatCmd = m.copilotChat.Update(msg)
 		return m, tea.Batch(cmd, chatCmd)
+	}
+	if m.mode == modeCommit {
+		var commitCmd tea.Cmd
+		m.commitModel, commitCmd = m.commitModel.Update(msg)
+		return m, tea.Batch(cmd, commitCmd)
 	}
 	return m, cmd
 }
@@ -402,6 +450,8 @@ func (m Model) View() tea.View {
 		content = m.renderPickerOverlay(content, contentHeight)
 	} else if m.mode == modeCopilotChat {
 		content = m.renderChatOverlay(content, contentHeight)
+	} else if m.mode == modeCommit {
+		content = m.renderCommitOverlay(content, contentHeight)
 	}
 
 	var output string
@@ -575,6 +625,133 @@ func (m Model) renderChatOverlay(bg string, bgHeight int) string {
 	return strings.Join(bgLines, "\n")
 }
 
+func (m Model) openCommitFlow(action string) (tea.Model, tea.Cmd) {
+	var commitAction commit.Action
+	switch action {
+	case "commit":
+		commitAction = commit.ActionCommit
+	case "commit-push":
+		commitAction = commit.ActionCommitPush
+	case "commit-push-pr":
+		commitAction = commit.ActionCommitPushPR
+	default:
+		return m, nil
+	}
+
+	// Reuse or create the copilot client.
+	if m.chatClient == nil {
+		repoRoot := m.repoRoot
+		if repoRoot == "" {
+			repoRoot = "."
+		}
+		cp, err := copilot.New(repoRoot)
+		if err != nil {
+			return m, nil
+		}
+		go cp.Start()
+		m.chatClient = agents.New(cp)
+	}
+
+	branch, _ := git.CurrentBranch(m.repoRoot)
+	modalW := m.width / 2
+	if modalW < 60 {
+		modalW = 60
+	}
+	modalH := m.height / 2
+	if modalH < 12 {
+		modalH = 12
+	}
+
+	m.commitModel = commit.New(m.chatClient, commitAction, m.repoRoot, branch, modalW, modalH)
+	m.mode = modeCommit
+	return m, m.commitModel.Init()
+}
+
+func (m Model) commitPickerItems() []picker.Item {
+	return []picker.Item{
+		{Label: "Commit", Description: "Commit staged changes", Value: "commit", Keywords: []string{"git"}},
+		{Label: "Commit & Push", Description: "Commit and push to remote", Value: "commit-push", Keywords: []string{"git", "push"}},
+		{Label: "Commit, Push & Open PR", Description: "Commit, push, and open a pull request", Value: "commit-push-pr", Keywords: []string{"git", "push", "pr", "pull request"}},
+	}
+}
+
+func (m Model) renderCommitOverlay(bg string, bgHeight int) string {
+	commitView := m.commitModel.View()
+	commitLines := strings.Split(commitView, "\n")
+
+	modalW := m.width / 2
+	if modalW < 60 {
+		modalW = 60
+	}
+	if modalW > m.width-4 {
+		modalW = m.width - 4
+	}
+	innerW := modalW - 4
+	modalH := len(commitLines) + 2
+
+	padY := (bgHeight - modalH) / 3
+	if padY < 1 {
+		padY = 1
+	}
+
+	bc := lipgloss.NewStyle().Foreground(lipgloss.BrightBlack)
+	titleStr := " " + lipgloss.NewStyle().Bold(true).Render("Commit") + " "
+	titleW := lipgloss.Width(titleStr)
+	fillW := modalW - 3 - titleW
+	if fillW < 0 {
+		fillW = 0
+	}
+	topBorder := bc.Render("╭─") + titleStr + bc.Render(strings.Repeat("─", fillW)+"╮")
+	bw := modalW - 2
+	if bw < 0 {
+		bw = 0
+	}
+	bottomBorder := bc.Render("╰" + strings.Repeat("─", bw) + "╯")
+	side := bc.Render("│")
+
+	var modalLines []string
+	modalLines = append(modalLines, topBorder)
+	for _, cl := range commitLines {
+		clW := lipgloss.Width(cl)
+		pad := innerW - clW
+		if pad < 0 {
+			pad = 0
+		}
+		modalLines = append(modalLines, side+" "+cl+strings.Repeat(" ", pad)+" "+side)
+	}
+	modalLines = append(modalLines, bottomBorder)
+
+	bgLines := strings.Split(bg, "\n")
+	padX := (m.width - modalW) / 2
+	rightStart := padX + modalW
+
+	for i, ml := range modalLines {
+		row := padY + i
+		if row >= 0 && row < len(bgLines) {
+			bgLine := bgLines[row]
+			bgW := lipgloss.Width(bgLine)
+
+			left := ""
+			if padX > 0 {
+				left = truncateVisible(bgLine, padX)
+				leftW := lipgloss.Width(left)
+				if leftW < padX {
+					left += strings.Repeat(" ", padX-leftW)
+				}
+			}
+
+			right := ""
+			if bgW > rightStart {
+				right = xansi.Cut(bgLine, rightStart, bgW)
+			}
+
+			bgLines[row] = left + "\033[0m" + ml + "\033[0m" + right
+		}
+	}
+
+	return strings.Join(bgLines, "\n")
+}
+
 // filesProvider lets the file picker discover files from any active view
 // that exposes a tree of files in its sidebar.
 type filesProvider interface {
@@ -634,6 +811,7 @@ func (m Model) helpPickerItems() []picker.Item {
 		{Label: "?", Description: "Open help", Keywords: []string{"keybindings", "shortcuts"}},
 		{Label: "^p", Description: "Fuzzy find a file in the sidebar", Keywords: []string{"file", "find", "fuzzy", "open"}},
 		{Label: "`", Description: "Copilot chat", Keywords: []string{"ai", "copilot"}},
+		{Label: "C", Description: "Commit staged changes", Keywords: []string{"commit", "push", "pr"}},
 		{Label: "^c", Description: "Quit"},
 	}
 

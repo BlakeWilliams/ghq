@@ -748,7 +748,6 @@ func (m *Model) selectTreeEntry() tea.Cmd {
 	if fileIdx < len(m.dv.RenderedFiles) && m.dv.RenderedFiles[fileIdx] == "" {
 		m.formatFile(fileIdx)
 	}
-	m.dv.RunSearch() // re-apply search to new file
 	m.rebuildContent()
 	m.dv.VP.GotoTop()
 	return nil
@@ -1429,6 +1428,9 @@ func (m Model) descWidth() int {
 
 func (m *Model) rebuildContent() {
 	m.dv.HelpLine = m.helpLine()
+	if m.dv.SearchPattern != nil {
+		m.dv.RunSearch()
+	}
 	m.dv.RebuildContent(m.buildOverviewContent, m.buildFileContent)
 }
 

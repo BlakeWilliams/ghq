@@ -599,7 +599,6 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 		if msg.index == m.dv.CurrentFileIdx {
 			m.dv.RenderedFiles[msg.index] = "" // invalidate to force re-render with highlights
 			m.formatFile(msg.index)
-			m.dv.RunSearch() // re-apply search after highlighting
 			m.rebuildContent()
 		} else {
 			m.dv.RenderedFiles[msg.index] = "" // invalidate so next access uses highlights
@@ -1227,12 +1226,18 @@ func (m Model) renderLayout(rightView string) string {
 
 func (m *Model) rebuildContent() {
 	m.dv.HelpLine = m.helpLine()
+	if m.dv.SearchPattern != nil {
+		m.dv.RunSearch()
+	}
 	m.dv.RebuildContent(m.buildOverviewContent, m.buildFileContent)
 	m.updateCommentCounts()
 }
 
 func (m *Model) rebuildContentIfChanged() {
 	m.dv.HelpLine = m.helpLine()
+	if m.dv.SearchPattern != nil {
+		m.dv.RunSearch()
+	}
 	m.dv.RebuildContentIfChanged(m.buildOverviewContent, m.buildFileContent)
 	m.updateCommentCounts()
 }
@@ -1731,7 +1736,6 @@ func (m *Model) selectTreeEntry() tea.Cmd {
 	if m.dv.RenderedFiles[fileIdx] == "" {
 		m.formatFile(fileIdx)
 	}
-	m.dv.RunSearch() // re-apply search to new file
 	m.rebuildContent()
 	m.dv.ScrollToDiffCursor()
 	m.markCurrentThreadRead()

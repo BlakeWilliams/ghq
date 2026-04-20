@@ -95,3 +95,20 @@ func BranchDiff(dir string) (string, error) {
 	return string(out), nil
 }
 
+// BranchLog returns the commit log of the current branch vs the default branch.
+func BranchLog(dir string) (string, error) {
+	base := exec.Command("gh", "repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name")
+	base.Dir = dir
+	baseOut, err := base.Output()
+	defaultBranch := strings.TrimSpace(string(baseOut))
+	if err != nil || defaultBranch == "" {
+		defaultBranch = "main"
+	}
+
+	cmd := exec.Command("git", "-C", dir, "log", "--oneline", defaultBranch+"..HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git log branch: %w", err)
+	}
+	return string(out), nil
+}

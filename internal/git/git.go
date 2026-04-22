@@ -135,8 +135,46 @@ func MergeBase(dir, branch string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// FetchRef fetches a specific ref from a remote.
+func FetchRef(dir, remote, ref string) error {
+	cmd := exec.Command("git", "-C", dir, "fetch", remote, ref)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git fetch %s %s: %w", remote, ref, err)
+	}
+	return nil
+}
+
+// LocalBranches returns the list of local branch names.
+func LocalBranches(dir string) ([]string, error) {
+	cmd := exec.Command("git", "-C", dir, "for-each-ref", "--format=%(refname:short)", "refs/heads/")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git for-each-ref: %w", err)
+	}
+	raw := strings.TrimSpace(string(out))
+	if raw == "" {
+		return nil, nil
+	}
+	return strings.Split(raw, "\n"), nil
+}
+
+// ResolveMergeBase resolves the merge-base SHA for branch mode.
+// If baseBranch is non-empty, uses it; otherwise falls back to DefaultBranch.
+func ResolveMergeBase(dir, baseBranch string) (string, error) {
+	if baseBranch == "" {
+		var err error
+		baseBranch, err = DefaultBranch(dir)
+		if err != nil {
+			return "", err
+		}
+	}
+	return MergeBase(dir, baseBranch)
+}
+
 // Diff runs git diff and returns the raw unified diff output.
-func Diff(dir string, mode DiffMode) (string, error) {
+// For DiffBranch mode, baseBranch overrides the default branch used to compute
+// the merge base. If empty, falls back to DefaultBranch().
+func Diff(dir string, mode DiffMode, baseBranch string) (string, error) {
 	var args []string
 
 	hasCommits := HasCommits(dir)
@@ -156,16 +194,10 @@ func Diff(dir string, mode DiffMode) (string, error) {
 		if !hasCommits {
 			return "", nil // can't diff branches with no commits
 		}
-		defaultBranch, err := DefaultBranch(dir)
+		mergeBase, err := ResolveMergeBase(dir, baseBranch)
 		if err != nil {
 			return "", err
 		}
-		mbCmd := exec.Command("git", "-C", dir, "merge-base", defaultBranch, "HEAD")
-		mbOut, err := mbCmd.Output()
-		if err != nil {
-			return "", fmt.Errorf("git merge-base: %w", err)
-		}
-		mergeBase := strings.TrimSpace(string(mbOut))
 		args = []string{"-C", dir, "diff", mergeBase + "..HEAD", "--no-color"}
 	}
 
@@ -330,7 +362,8 @@ func ParseDiffToFiles(rawDiff string) []github.PullRequestFile {
 }
 
 // DiffStat returns a short stat summary (e.g., "3 files changed, 10 insertions(+), 5 deletions(-)").
-func DiffStat(dir string, mode DiffMode) (string, error) {
+// For DiffBranch mode, baseBranch overrides the default branch. If empty, uses DefaultBranch().
+func DiffStat(dir string, mode DiffMode, baseBranch string) (string, error) {
 	var args []string
 	switch mode {
 	case DiffWorking:
@@ -338,16 +371,10 @@ func DiffStat(dir string, mode DiffMode) (string, error) {
 	case DiffStaged:
 		args = []string{"-C", dir, "diff", "--cached", "--stat", "--no-color"}
 	case DiffBranch:
-		defaultBranch, err := DefaultBranch(dir)
+		mergeBase, err := ResolveMergeBase(dir, baseBranch)
 		if err != nil {
 			return "", err
 		}
-		mbCmd := exec.Command("git", "-C", dir, "merge-base", defaultBranch, "HEAD")
-		mbOut, err := mbCmd.Output()
-		if err != nil {
-			return "", fmt.Errorf("git merge-base: %w", err)
-		}
-		mergeBase := strings.TrimSpace(string(mbOut))
 		args = []string{"-C", dir, "diff", mergeBase + "..HEAD", "--stat", "--no-color"}
 	}
 
@@ -372,7 +399,8 @@ func FilesAddedDeletedStats(files []github.PullRequestFile) (adds, dels int) {
 }
 
 // NumStat returns per-file add/delete counts using git diff --numstat.
-func NumStat(dir string, mode DiffMode) (map[string][2]int, error) {
+// For DiffBranch mode, baseBranch overrides the default branch. If empty, uses DefaultBranch().
+func NumStat(dir string, mode DiffMode, baseBranch string) (map[string][2]int, error) {
 	var args []string
 	switch mode {
 	case DiffWorking:
@@ -380,16 +408,10 @@ func NumStat(dir string, mode DiffMode) (map[string][2]int, error) {
 	case DiffStaged:
 		args = []string{"-C", dir, "diff", "--cached", "--numstat", "--no-color"}
 	case DiffBranch:
-		defaultBranch, err := DefaultBranch(dir)
+		mergeBase, err := ResolveMergeBase(dir, baseBranch)
 		if err != nil {
 			return nil, err
 		}
-		mbCmd := exec.Command("git", "-C", dir, "merge-base", defaultBranch, "HEAD")
-		mbOut, err := mbCmd.Output()
-		if err != nil {
-			return nil, err
-		}
-		mergeBase := strings.TrimSpace(string(mbOut))
 		args = []string{"-C", dir, "diff", mergeBase + "..HEAD", "--numstat", "--no-color"}
 	}
 

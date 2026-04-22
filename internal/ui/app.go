@@ -341,6 +341,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
+		if kind == "merge-base" {
+			// Accept either a selected branch or freeform typed ref.
+			ref := msg.Value
+			if ref == "" {
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.activeView, cmd = m.activeView.Update(localdiff.SetMergeBaseMsg{Ref: ref})
+			return m, cmd
+		}
+
 		if !msg.Selected && msg.Value != "" {
 			// Raw query — try line number.
 			if lineNo, err := strconv.Atoi(msg.Value); err == nil && lineNo > 0 {
@@ -424,6 +435,21 @@ func (m Model) handleCommand(msg commandbar.CommandMsg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.activeView, cmd = m.activeView.Update(localdiff.ResetExpansionsMsg{})
 		return m, cmd
+	case "set-merge-base":
+		items := m.branchPickerItems()
+		m.mode = modePicker
+		m.pickerKind = "merge-base"
+		m.picker = picker.New("Merge Base", items, m.pickerInnerWidth(), m.height-chromeHeight)
+		return m, nil
+	case "view-on-github":
+		if v, ok := m.activeView.(localdiff.Model); ok && v.PR() != nil {
+			url := v.PR().HTMLURL
+			if url == "" {
+				url = fmt.Sprintf("https://github.com/%s/%s/pull/%d", m.ctx.Owner, m.ctx.Repo, v.PR().Number)
+			}
+			terminal.OpenURL(url)
+		}
+		return m, nil
 	}
 	return m, nil
 }
@@ -824,6 +850,12 @@ func (m Model) commandPickerItems() []picker.Item {
 	defaultBranch, _ := git.DefaultBranchShort(m.repoRoot)
 	if branch != defaultBranch {
 		items = append(items, picker.Item{Label: "Branch Diff", Description: "vs " + defaultBranch, Value: "branch", Keywords: []string{"mode", "compare"}})
+		items = append(items, picker.Item{Label: "Set Merge Base", Description: "Override branch diff base", Value: "set-merge-base", Keywords: []string{"base", "compare", "ref"}})
+	}
+
+	// PR-specific commands.
+	if v, ok := m.activeView.(localdiff.Model); ok && v.PR() != nil {
+		items = append(items, picker.Item{Label: "View on GitHub", Description: fmt.Sprintf("PR #%d", v.PR().Number), Value: "view-on-github", Keywords: []string{"open", "browser", "web", "pr"}})
 	}
 
 	items = append(items,
@@ -864,6 +896,15 @@ func (m Model) pickerModalWidth() int {
 		w = m.width - 4
 	}
 	return w
+}
+
+func (m Model) branchPickerItems() []picker.Item {
+	branches, _ := git.LocalBranches(m.repoRoot)
+	var items []picker.Item
+	for _, b := range branches {
+		items = append(items, picker.Item{Label: b, Value: b})
+	}
+	return items
 }
 
 func (m Model) pickerInnerWidth() int {

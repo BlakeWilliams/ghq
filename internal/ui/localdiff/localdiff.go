@@ -73,6 +73,11 @@ type SwitchModeMsg struct {
 	Mode git.DiffMode
 }
 
+// SetMergeBaseMsg overrides the branch used to compute the merge base for branch mode.
+type SetMergeBaseMsg struct {
+	Ref string
+}
+
 // prDetectedMsg is a localdiff-internal message for PR auto-detection.
 // This is separate from uictx.PRLoadedMsg so the app doesn't intercept it.
 type prDetectedMsg struct {
@@ -81,6 +86,12 @@ type prDetectedMsg struct {
 
 // prDetectFailedMsg means no PR was found for this branch.
 type prDetectFailedMsg struct{}
+
+// fetchBaseDoneMsg is sent when the PR base ref has been fetched from origin.
+type fetchBaseDoneMsg struct{}
+
+// fetchBaseFailedMsg is sent when fetching the PR base ref fails.
+type fetchBaseFailedMsg struct{}
 
 var dimStyle = lipgloss.NewStyle().Foreground(lipgloss.BrightBlack)
 
@@ -120,6 +131,7 @@ type Model struct {
 	repoRoot string
 	branchData      branchData
 	mode     git.DiffMode
+	mergeBaseRef string // override for branch mode; empty = use default branch
 
 	// Mode used for last highlight generation (to invalidate cache on mode change).
 	lastHighlightMode git.DiffMode
@@ -314,8 +326,9 @@ func (m Model) watchAfterCooldown() tea.Cmd {
 func (m Model) loadDiff() tea.Cmd {
 	repoRoot := m.repoRoot
 	mode := m.mode
+	baseBranch := m.mergeBaseRef
 	return func() tea.Msg {
-		rawDiff, err := git.Diff(repoRoot, mode)
+		rawDiff, err := git.Diff(repoRoot, mode, baseBranch)
 		if err != nil {
 			return diffErrorMsg{err: err}
 		}
@@ -518,10 +531,33 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 	case prDetectedMsg:
 		m.branchData.pr = &msg.PR
 		m.branchData.prLoaded = true
-		return m, tea.Batch(m.fetchReviewComments(), m.reviewCommentsTimer())
+		// Align branch view merge base with PR base and fetch it.
+		m.mergeBaseRef = "origin/" + msg.PR.Base.Ref
+		cmds := []tea.Cmd{m.fetchReviewComments(), m.reviewCommentsTimer(), m.fetchBaseRef(msg.PR.Base.Ref)}
+		return m, tea.Batch(cmds...)
 
 	case prDetectFailedMsg:
 		m.branchData.prLoaded = true
+		return m, nil
+
+	case fetchBaseDoneMsg:
+		// Base ref fetched — reload branch diff if in branch mode.
+		if m.mode == git.DiffBranch {
+			return m, m.loadDiff()
+		}
+		return m, nil
+
+	case fetchBaseFailedMsg:
+		return m, nil
+
+	case SetMergeBaseMsg:
+		m.mergeBaseRef = msg.Ref
+		if m.mode == git.DiffBranch {
+			m.dv.FilesListLoaded = false
+			m.dv.FilesHighlighted = 0
+			m.dv.FilesLoading = true
+			return m, m.loadDiff()
+		}
 		return m, nil
 
 	case reviewCommentsRefreshMsg:
@@ -1705,6 +1741,7 @@ func (m Model) highlightFileCmd(index int) tea.Cmd {
 	repoRoot := m.repoRoot
 	chromaStyle := m.ctx.DiffColors.ChromaStyle
 	mode := m.mode
+	baseBranch := m.mergeBaseRef
 
 	return func() tea.Msg {
 		var fileContent, oldFileContent string
@@ -1732,8 +1769,7 @@ func (m Model) highlightFileCmd(index int) tea.Cmd {
 				ref = "HEAD"
 			case git.DiffBranch:
 				// For branch mode, the "old" side is the merge-base commit.
-				defaultBranch, _ := git.DefaultBranch(repoRoot)
-				if mb, err := git.MergeBase(repoRoot, defaultBranch); err == nil {
+				if mb, err := git.ResolveMergeBase(repoRoot, baseBranch); err == nil {
 					ref = mb
 				} else {
 					ref = "HEAD"
@@ -1849,6 +1885,17 @@ func (m Model) reviewCommentsTimer() tea.Cmd {
 	return tea.Tick(2*time.Minute, func(time.Time) tea.Msg {
 		return reviewCommentsTimerMsg{}
 	})
+}
+
+// fetchBaseRef fetches the given ref from origin so the merge base is up-to-date.
+func (m Model) fetchBaseRef(ref string) tea.Cmd {
+	repoRoot := m.repoRoot
+	return func() tea.Msg {
+		if err := git.FetchRef(repoRoot, "origin", ref); err != nil {
+			return fetchBaseFailedMsg{}
+		}
+		return fetchBaseDoneMsg{}
+	}
 }
 
 

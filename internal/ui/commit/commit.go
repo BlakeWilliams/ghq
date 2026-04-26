@@ -18,10 +18,12 @@ import (
 type Action int
 
 const (
-	ActionCommit     Action = iota // commit only
-	ActionCommitPush               // commit + push
-	ActionPush                     // push only
-	ActionOpenPR                   // open PR (no commit/push)
+	ActionCommit        Action = iota // commit only
+	ActionCommitPush                  // commit + push
+	ActionPush                        // push only
+	ActionOpenPR                      // open PR (no commit/push)
+	ActionCommitAll                   // stage all + commit
+	ActionCommitAllPush               // stage all + commit + push
 )
 
 func (a Action) String() string {
@@ -34,13 +36,27 @@ func (a Action) String() string {
 		return "Push"
 	case ActionOpenPR:
 		return "Open PR"
+	case ActionCommitAll:
+		return "Commit All"
+	case ActionCommitAllPush:
+		return "Commit All & Push"
 	}
 	return ""
 }
 
 // NeedsCommit returns true if this action requires a commit message.
 func (a Action) NeedsCommit() bool {
-	return a == ActionCommit || a == ActionCommitPush
+	return a == ActionCommit || a == ActionCommitPush || a == ActionCommitAll || a == ActionCommitAllPush
+}
+
+// NeedsStageAll returns true if this action stages all changes first.
+func (a Action) NeedsStageAll() bool {
+	return a == ActionCommitAll || a == ActionCommitAllPush
+}
+
+// NeedsPush returns true if this action pushes after committing.
+func (a Action) NeedsPush() bool {
+	return a == ActionCommitPush || a == ActionCommitAllPush || a == ActionPush
 }
 
 // NeedsPR returns true if this action opens a pull request.
@@ -234,7 +250,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		switch msg.String() {
 		case "esc":
 			return m, func() tea.Msg { return CancelMsg{} }
-		case "ctrl+s":
+		case "enter":
 			body := strings.TrimSpace(m.input.Value())
 			if body == "" {
 				return m, nil
@@ -253,6 +269,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				m.executeAction(body),
 				tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg { return tickMsg{} }),
 			)
+		case "shift+enter":
+			m.input.InsertString("\n")
+			m.resizeTextarea()
+			return m, nil
 		case "ctrl+e":
 			return m, m.openEditor()
 		}
@@ -340,66 +360,85 @@ func (m *Model) handleEvent(ev agents.AgentEvent) {
 }
 
 func (m Model) generateMessage() tea.Cmd {
-	diff, err := git.StagedDiff(m.repoRoot)
-	if err != nil {
-		return func() tea.Msg {
+	return func() tea.Msg {
+		if m.action.NeedsStageAll() {
+			if err := git.StageAll(m.repoRoot); err != nil {
+				return ErrorMsg{Err: fmt.Errorf("failed to stage changes: %w", err)}
+			}
+		}
+		diff, err := git.StagedDiff(m.repoRoot)
+		if err != nil {
 			return ErrorMsg{Err: fmt.Errorf("failed to get staged diff: %w", err)}
 		}
-	}
 
-	if len(diff) > 30000 {
-		diff = diff[:30000] + "\n... (truncated)"
-	}
+		if len(diff) > 30000 {
+			diff = diff[:30000] + "\n... (truncated)"
+		}
 
-	var prompt strings.Builder
-	prompt.WriteString("Generate a git commit message for the following staged changes.\n")
-	prompt.WriteString("Format: a concise title (max 72 chars) on the first line, then a blank line, then a description.\n")
-	prompt.WriteString("Use imperative mood. Do not wrap the description. Focus on why, not what.\n")
-	prompt.WriteString("Output ONLY the commit message, no explanation or markdown fences.\n\n")
-	if m.cfg.CommitPrompt != "" {
-		prompt.WriteString("Additional instructions: " + m.cfg.CommitPrompt + "\n\n")
-	}
-	if m.branch != "" {
-		prompt.WriteString("Branch: " + m.branch + "\n\n")
-	}
-	prompt.WriteString("```diff\n" + diff + "\n```\n")
+		var prompt strings.Builder
+		prompt.WriteString("Generate a git commit message for the following staged changes.\n")
+		prompt.WriteString("Format: a concise title (max 72 chars) on the first line, then a blank line, then a description.\n")
+		prompt.WriteString("Use imperative mood. Do not wrap the description. Focus on why, not what.\n")
+		prompt.WriteString("Output ONLY the commit message, no explanation or markdown fences.\n\n")
+		if m.cfg.CommitPrompt != "" {
+			prompt.WriteString("Additional instructions: " + m.cfg.CommitPrompt + "\n\n")
+		}
+		if m.branch != "" {
+			prompt.WriteString("Branch: " + m.branch + "\n\n")
+		}
+		prompt.WriteString("```diff\n" + diff + "\n```\n")
 
-	return m.client.SendPrompt("commit-msg", prompt.String())
+		if m.client == nil {
+			return ErrorMsg{Err: fmt.Errorf("copilot client not available")}
+		}
+		if err := m.client.Send("commit-msg", prompt.String()); err != nil {
+			return ErrorMsg{Err: fmt.Errorf("failed to send prompt: %w", err)}
+		}
+		return nil
+	}
 }
 
 func (m Model) generatePRDescription() tea.Cmd {
-	diff, err := git.BranchDiff(m.repoRoot)
-	if err != nil {
-		diff = ""
-	}
-	log, err := git.BranchLog(m.repoRoot)
-	if err != nil {
-		log = ""
-	}
+	return func() tea.Msg {
+		diff, err := git.BranchDiff(m.repoRoot)
+		if err != nil {
+			diff = ""
+		}
+		log, err := git.BranchLog(m.repoRoot)
+		if err != nil {
+			log = ""
+		}
 
-	if len(diff) > 30000 {
-		diff = diff[:30000] + "\n... (truncated)"
-	}
+		if len(diff) > 30000 {
+			diff = diff[:30000] + "\n... (truncated)"
+		}
 
-	var prompt strings.Builder
-	prompt.WriteString("Generate a pull request title and description.\n")
-	prompt.WriteString("Format: a concise PR title on the first line, then a blank line, then a markdown description.\n")
-	prompt.WriteString("The description should explain what changed and why. Use markdown formatting.\n")
-	prompt.WriteString("Output ONLY the title and description, no explanation or outer markdown fences.\n\n")
-	if m.cfg.PRPrompt != "" {
-		prompt.WriteString("Additional instructions: " + m.cfg.PRPrompt + "\n\n")
-	}
-	if m.branch != "" {
-		prompt.WriteString("Branch: " + m.branch + "\n\n")
-	}
-	if log != "" {
-		prompt.WriteString("Commits:\n```\n" + log + "```\n\n")
-	}
-	if diff != "" {
-		prompt.WriteString("```diff\n" + diff + "\n```\n")
-	}
+		var prompt strings.Builder
+		prompt.WriteString("Generate a pull request title and description.\n")
+		prompt.WriteString("Format: a concise PR title on the first line, then a blank line, then a markdown description.\n")
+		prompt.WriteString("The description should explain what changed and why. Use markdown formatting.\n")
+		prompt.WriteString("Output ONLY the title and description, no explanation or outer markdown fences.\n\n")
+		if m.cfg.PRPrompt != "" {
+			prompt.WriteString("Additional instructions: " + m.cfg.PRPrompt + "\n\n")
+		}
+		if m.branch != "" {
+			prompt.WriteString("Branch: " + m.branch + "\n\n")
+		}
+		if log != "" {
+			prompt.WriteString("Commits:\n```\n" + log + "```\n\n")
+		}
+		if diff != "" {
+			prompt.WriteString("```diff\n" + diff + "\n```\n")
+		}
 
-	return m.client.SendPrompt("pr-description", prompt.String())
+		if m.client == nil {
+			return ErrorMsg{Err: fmt.Errorf("copilot client not available")}
+		}
+		if err := m.client.Send("pr-description", prompt.String()); err != nil {
+			return ErrorMsg{Err: fmt.Errorf("failed to send prompt: %w", err)}
+		}
+		return nil
+	}
 }
 
 func (m Model) openEditor() tea.Cmd {
@@ -437,11 +476,16 @@ func (m Model) openEditor() tea.Cmd {
 
 func (m Model) executeAction(message string) tea.Cmd {
 	return func() tea.Msg {
+		if m.action.NeedsStageAll() {
+			if err := git.StageAll(m.repoRoot); err != nil {
+				return execResultMsg{err: fmt.Errorf("stage all failed: %w", err)}
+			}
+		}
 		if m.action.NeedsCommit() {
 			if err := git.Commit(m.repoRoot, message); err != nil {
 				return execResultMsg{err: fmt.Errorf("commit failed: %w", err)}
 			}
-			if m.action == ActionCommit {
+			if !m.action.NeedsPush() {
 				return execResultMsg{}
 			}
 		}
@@ -535,9 +579,9 @@ func (m Model) View() string {
 		}
 		btnStyle := lipgloss.NewStyle().Background(lipgloss.Green).Foreground(lipgloss.Black).Bold(true)
 		escStyle := lipgloss.NewStyle().Background(lipgloss.White).Foreground(lipgloss.Black)
-		btn := btnStyle.Render(" ctrl+s ")
+		btn := btnStyle.Render(" enter ")
 		esc := escStyle.Render(" esc ")
-		left := dimStyle.Render("  ctrl+e $EDITOR")
+		left := dimStyle.Render("  ctrl+e $EDITOR  shift+enter newline")
 		leftW := lipgloss.Width(left)
 		rightBtns := esc + " " + btn
 		rightW := lipgloss.Width(rightBtns)

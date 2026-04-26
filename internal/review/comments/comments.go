@@ -177,6 +177,17 @@ func (s *CommentStore) FindThreadRoot(path string, line int, side string) string
 	return ""
 }
 
+// ThreadHasCopilotComment returns true if the thread rooted at rootID
+// contains any comment authored by copilot.
+func (s *CommentStore) ThreadHasCopilotComment(rootID string) bool {
+	for _, c := range s.Comments {
+		if (c.ID == rootID || c.InReplyToID == rootID) && c.Author == "copilot" {
+			return true
+		}
+	}
+	return false
+}
+
 // Resolve toggles the resolved state of all comments in a thread,
 // walking the full reply chain (not just direct children of root).
 func (s *CommentStore) Resolve(rootID string, resolved bool) {

@@ -28,21 +28,34 @@ type Config struct {
 	// PRPrompt is additional user instructions appended to the base
 	// PR description generation prompt. Leave empty for default behavior.
 	PRPrompt string `yaml:"pull_request_prompt"`
+
+	// CommentPanelMinWidth is the minimum width for the side comment panel.
+	// The panel only appears when the terminal is wide enough to fit both
+	// this and DiffMinWidth. Default: 55.
+	CommentPanelMinWidth int `yaml:"comment_panel_min_width"`
+
+	// DiffMinWidth is the minimum width reserved for the diff content when
+	// the comment panel is shown beside it. Default: 90.
+	DiffMinWidth int `yaml:"diff_min_width"`
 }
 
 // Default returns a Config with all defaults applied.
 func Default() Config {
 	return Config{
-		HelpMode: true,
+		HelpMode:             true,
+		CommentPanelMinWidth: 55,
+		DiffMinWidth:         90,
 	}
 }
 
 // raw mirrors Config but uses pointers so we can detect "field not set"
 // vs "field set to zero value" and apply defaults appropriately.
 type raw struct {
-	HelpMode     *bool   `yaml:"help_mode"`
-	CommitPrompt *string `yaml:"commit_prompt"`
-	PRPrompt *string `yaml:"pull_request_prompt"`
+	HelpMode             *bool   `yaml:"help_mode"`
+	CommitPrompt         *string `yaml:"commit_prompt"`
+	PRPrompt             *string `yaml:"pull_request_prompt"`
+	CommentPanelMinWidth *int    `yaml:"comment_panel_min_width"`
+	DiffMinWidth         *int    `yaml:"diff_min_width"`
 }
 
 // Load reads the user config from the standard XDG location, falling back
@@ -79,6 +92,21 @@ func LoadFrom(path string) (Config, error) {
 	if r.PRPrompt != nil {
 		cfg.PRPrompt = *r.PRPrompt
 	}
+	if r.CommentPanelMinWidth != nil {
+		cfg.CommentPanelMinWidth = *r.CommentPanelMinWidth
+	}
+	if r.DiffMinWidth != nil {
+		cfg.DiffMinWidth = *r.DiffMinWidth
+	}
+
+	// Clamp to sane minimums.
+	if cfg.CommentPanelMinWidth < 30 {
+		cfg.CommentPanelMinWidth = 30
+	}
+	if cfg.DiffMinWidth < 40 {
+		cfg.DiffMinWidth = 40
+	}
+
 	return cfg, nil
 }
 

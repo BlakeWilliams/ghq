@@ -48,6 +48,12 @@ func (rs *ReadState) MarkReadInt(threadRootID int) {
 	rs.MarkRead(strconv.Itoa(threadRootID))
 }
 
+// LastReadTime returns the last time the thread was marked read.
+// Returns zero time if never read.
+func (rs *ReadState) LastReadTime(threadRootID string) time.Time {
+	return rs.Seen[threadRootID]
+}
+
 // IsThreadUnread returns true if the thread has activity newer than the last
 // time it was marked read. If the thread has never been read, it's unread.
 func (rs *ReadState) IsThreadUnread(threadRootID string, newestComment time.Time) bool {

@@ -29,8 +29,6 @@ var (
 	treeDim      = lipgloss.NewStyle().Foreground(lipgloss.BrightBlack)
 	treeAdd      = lipgloss.NewStyle().Foreground(lipgloss.Green)
 	treeDel      = lipgloss.NewStyle().Foreground(lipgloss.Red)
-	treeComment  = lipgloss.NewStyle().Foreground(lipgloss.BrightBlack)
-	treeUnread   = lipgloss.NewStyle().Foreground(lipgloss.Yellow)
 )
 
 // FileTreeEntry is a flat entry in the rendered tree.
@@ -140,7 +138,7 @@ func BuildFileTree(files []github.PullRequestFile) []FileTreeEntry {
 
 // RenderFileTree renders the file tree as exactly `height` lines.
 // Each line is padded to `width`. The cursor is kept visible.
-func RenderFileTree(entries []FileTreeEntry, files []github.PullRequestFile, cursor int, currentFileIdx int, width, height int, commentCounts, unreadCounts []int) []string {
+func RenderFileTree(entries []FileTreeEntry, files []github.PullRequestFile, cursor int, currentFileIdx int, width, height int, fileBadges []BadgeInfo, animFrame int) []string {
 	loading := len(entries) == 0
 	skeletonCount := 8
 	entryCount := len(entries)
@@ -222,21 +220,17 @@ func RenderFileTree(entries []FileTreeEntry, files []github.PullRequestFile, cur
 			line = depthPad + name + " " + stats
 
 			// Comment badge: right-aligned "󰆈 N"
-			cc := 0
-			if e.FileIndex < len(commentCounts) {
-				cc = commentCounts[e.FileIndex]
+			var badge BadgeInfo
+			if e.FileIndex < len(fileBadges) {
+				badge = fileBadges[e.FileIndex]
 			}
-			if cc > 0 {
-				uc := 0
-				if e.FileIndex < len(unreadCounts) {
-					uc = unreadCounts[e.FileIndex]
+			if badge.Count > 0 {
+				badgeText := iconComment + " " + strconv.Itoa(badge.Count)
+				if badge.Working {
+					badgeText = badgeSpinFrames[animFrame%len(badgeSpinFrames)]
 				}
-				badge := iconComment + " " + strconv.Itoa(cc)
-				style := treeComment
-				if uc > 0 {
-					style = treeUnread
-				}
-				badgeRendered := style.Render(badge)
+				style := TreeBadgeStyle(badge.Urgency, badge.Working)
+				badgeRendered := style.Render(badgeText)
 				badgeW := lipgloss.Width(badgeRendered)
 				lineW := lipgloss.Width(line)
 				gap := width - lineW - badgeW - 1 // 1 col right margin
@@ -276,9 +270,9 @@ type FileTree struct {
 	Focused           bool
 	CurrentFileIdx    int // which file is currently being viewed (-1 = overview)
 	Files             []github.PullRequestFile
-	ChromeRows        int   // rows above tree (header + separator) for mouse offset
-	FileCommentCounts []int // total comment count per file (parallel to Files)
-	FileUnreadCounts  []int // unread comment count per file (parallel to Files)
+	ChromeRows        int         // rows above tree (header + separator) for mouse offset
+	FileBadges        []BadgeInfo // per-file badge data (parallel to Files)
+	AnimFrame         int         // animation frame for spinner badges
 }
 
 // SetFiles rebuilds the tree from a new file list and resets the cursor.
@@ -290,7 +284,7 @@ func (t *FileTree) SetFiles(files []github.PullRequestFile) {
 
 // View renders the file tree panel content (no borders — the parent adds those).
 func (t FileTree) View() []string {
-	return RenderFileTree(t.Entries, t.Files, t.Cursor, t.CurrentFileIdx, t.Width, t.Height, t.FileCommentCounts, t.FileUnreadCounts)
+	return RenderFileTree(t.Entries, t.Files, t.Cursor, t.CurrentFileIdx, t.Width, t.Height, t.FileBadges, t.AnimFrame)
 }
 
 // scrollStart computes the first visible entry index for the tree.

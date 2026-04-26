@@ -1372,7 +1372,7 @@ func (m Model) renderWithLeftSidebarFrom(view string) string {
 	treeW := m.dv.Tree.Width
 	divider := lipgloss.NewStyle().Foreground(lipgloss.BrightBlack).Render("│")
 
-	treeLines := components.RenderFileTree(m.dv.Tree.Entries, m.dv.Tree.Files, m.dv.Tree.Cursor, m.dv.CurrentFileIdx, treeW, m.dv.Height, nil, nil)
+	treeLines := components.RenderFileTree(m.dv.Tree.Entries, m.dv.Tree.Files, m.dv.Tree.Cursor, m.dv.CurrentFileIdx, treeW, m.dv.Height, nil, 0)
 	mainLines := strings.Split(view, "\n")
 
 	var b strings.Builder

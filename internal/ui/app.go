@@ -666,6 +666,10 @@ func (m Model) openCommitFlow(action string) (tea.Model, tea.Cmd) {
 		commitAction = commit.ActionCommit
 	case "commit-push":
 		commitAction = commit.ActionCommitPush
+	case "commit-all":
+		commitAction = commit.ActionCommitAll
+	case "commit-all-push":
+		commitAction = commit.ActionCommitAllPush
 	case "push":
 		commitAction = commit.ActionPush
 	case "open-pr":
@@ -706,6 +710,7 @@ func (m Model) openCommitFlow(action string) (tea.Model, tea.Cmd) {
 
 func (m Model) commitPickerItems() []picker.Item {
 	hasStaged := git.HasStagedChanges(m.repoRoot)
+	hasUnstaged := git.HasUnstagedChanges(m.repoRoot)
 	hasUnpushed := git.HasUnpushedCommits(m.repoRoot)
 	hasPR := git.HasOpenPR(m.repoRoot)
 
@@ -714,6 +719,12 @@ func (m Model) commitPickerItems() []picker.Item {
 		items = append(items,
 			picker.Item{Label: "Commit", Description: "Commit staged changes", Value: "commit", Keywords: []string{"git"}},
 			picker.Item{Label: "Commit & Push", Description: "Commit and push to remote", Value: "commit-push", Keywords: []string{"git", "push"}},
+		)
+	}
+	if hasUnstaged {
+		items = append(items,
+			picker.Item{Label: "Commit All", Description: "Stage all and commit", Value: "commit-all", Keywords: []string{"git", "stage", "all"}},
+			picker.Item{Label: "Commit All & Push", Description: "Stage all, commit, and push", Value: "commit-all-push", Keywords: []string{"git", "stage", "all", "push"}},
 		)
 	}
 	if hasUnpushed || hasStaged {
@@ -871,7 +882,7 @@ func (m Model) helpPickerItems() []picker.Item {
 		{Label: "?", Description: "Open help", Keywords: []string{"keybindings", "shortcuts"}},
 		{Label: "^p", Description: "Fuzzy find a file in the sidebar", Keywords: []string{"file", "find", "fuzzy", "open"}},
 		{Label: "`", Description: "Copilot chat", Keywords: []string{"ai", "copilot"}},
-		{Label: "C", Description: "Commit staged changes", Keywords: []string{"commit", "push", "pr"}},
+		{Label: "C", Description: "Git: commit, push, PR", Keywords: []string{"commit", "push", "pr"}},
 		{Label: "^c", Description: "Quit"},
 	}
 

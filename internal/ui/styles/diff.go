@@ -96,13 +96,13 @@ func ComputeDiffColors(p terminal.Palette) DiffColors {
 	dimColor := blendColor(selectTint, bg, 0.35)
 
 	colors := DiffColors{
-		SelectBg:      colorToBgCode(selectBg),
-		SelectedCtxBg: colorToBgCode(selectBg),
+		SelectBg:      ColorToBgCode(selectBg),
+		SelectedCtxBg: ColorToBgCode(selectBg),
 		SelectColor:   selectBg,
-		BorderFg:           colorToFgCode(borderColor),
+		BorderFg:           ColorToFgCode(borderColor),
 		BorderColor:        borderColor,
-		HighlightBorderFg:  colorToFgCode(orDefault(yellow, color.RGBA{R: 200, G: 180, B: 0, A: 255})),
-		SelectedBorderFg:   colorToFgCode(orDefault(white, color.RGBA{R: 255, G: 255, B: 255, A: 255})),
+		HighlightBorderFg:  ColorToFgCode(orDefault(yellow, color.RGBA{R: 200, G: 180, B: 0, A: 255})),
+		SelectedBorderFg:   ColorToFgCode(orDefault(white, color.RGBA{R: 255, G: 255, B: 255, A: 255})),
 		PaletteGreen:   orDefault(green, color.RGBA{R: 0, G: 180, B: 0, A: 255}),
 		PaletteRed:     orDefault(red, color.RGBA{R: 220, G: 50, B: 50, A: 255}),
 		PaletteYellow:  orDefault(yellow, color.RGBA{R: 200, G: 180, B: 0, A: 255}),
@@ -116,12 +116,12 @@ func ComputeDiffColors(p terminal.Palette) DiffColors {
 	// Subtle bg tints.
 	if green != nil {
 		addBg := blendColor(green, bg, 0.08)
-		colors.AddBg = colorToBgCode(addBg)
+		colors.AddBg = ColorToBgCode(addBg)
 		colors.AddBgColor = addBg
-		colors.AddFg = colorToFgCode(ensureContrast(green, addBg))
+		colors.AddFg = ColorToFgCode(ensureContrast(green, addBg))
 		// Selected add: stronger green tint.
 		selectedAddBg := blendColor(green, bg, 0.25)
-		colors.SelectedAddBg = colorToBgCode(selectedAddBg)
+		colors.SelectedAddBg = ColorToBgCode(selectedAddBg)
 	} else {
 		colors.AddBg = "\033[48;5;22m"
 		colors.AddBgColor = color.RGBA{R: 0, G: 95, B: 0, A: 255}
@@ -131,12 +131,12 @@ func ComputeDiffColors(p terminal.Palette) DiffColors {
 
 	if red != nil {
 		delBg := blendColor(red, bg, 0.08)
-		colors.DelBg = colorToBgCode(delBg)
+		colors.DelBg = ColorToBgCode(delBg)
 		colors.DelBgColor = delBg
-		colors.DelFg = colorToFgCode(ensureContrast(red, delBg))
+		colors.DelFg = ColorToFgCode(ensureContrast(red, delBg))
 		// Selected del: stronger red tint.
 		selectedDelBg := blendColor(red, bg, 0.25)
-		colors.SelectedDelBg = colorToBgCode(selectedDelBg)
+		colors.SelectedDelBg = ColorToBgCode(selectedDelBg)
 	} else {
 		colors.DelBg = "\033[48;5;52m"
 		colors.DelBgColor = color.RGBA{R: 95, G: 0, B: 0, A: 255}
@@ -146,11 +146,11 @@ func ComputeDiffColors(p terminal.Palette) DiffColors {
 
 	if blue != nil && white != nil {
 		hunkBg := blendColor(blue, bg, 0.10)
-		colors.HunkBg = colorToBgCode(hunkBg)
-		colors.HunkFg = colorToFgCode(ensureContrast(white, hunkBg))
+		colors.HunkBg = ColorToBgCode(hunkBg)
+		colors.HunkFg = ColorToFgCode(ensureContrast(white, hunkBg))
 		// Selected hunk: stronger blue tint.
 		selectedHunkBg := blendColor(blue, bg, 0.25)
-		colors.SelectedHunkBg = colorToBgCode(selectedHunkBg)
+		colors.SelectedHunkBg = ColorToBgCode(selectedHunkBg)
 	} else {
 		colors.HunkBg = "\033[48;5;17m"
 		colors.HunkFg = "\033[97;1m"
@@ -162,7 +162,7 @@ func ComputeDiffColors(p terminal.Palette) DiffColors {
 
 	// Search match bg: direct base16 yellow.
 	if yellow != nil {
-		colors.SearchMatchBg = colorToBgCode(yellow)
+		colors.SearchMatchBg = ColorToBgCode(yellow)
 	} else {
 		colors.SearchMatchBg = "\033[48;5;3m" // ANSI yellow fallback
 	}
@@ -284,12 +284,18 @@ func relativeLuminance(c color.Color) float64 {
 	return 0.2126*float64(r>>8)/255 + 0.7152*float64(g>>8)/255 + 0.0722*float64(b>>8)/255
 }
 
-func colorToBgCode(c color.Color) string {
+func ColorToBgCode(c color.Color) string {
+	if c == nil {
+		return ""
+	}
 	r, g, b, _ := c.RGBA()
 	return fmt.Sprintf("\033[48;2;%d;%d;%dm", r>>8, g>>8, b>>8)
 }
 
-func colorToFgCode(c color.Color) string {
+func ColorToFgCode(c color.Color) string {
+	if c == nil {
+		return ""
+	}
 	r, g, b, _ := c.RGBA()
 	return fmt.Sprintf("\033[38;2;%d;%d;%dm", r>>8, g>>8, b>>8)
 }

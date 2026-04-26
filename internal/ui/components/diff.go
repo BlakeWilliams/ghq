@@ -150,6 +150,13 @@ type DiffFormatOptions struct {
 	// side+line. When set, these replace the ReviewComment→RenderComment
 	// conversion for base comments (preserving blocks from local comments).
 	ThreadedComments map[CommentKey][]RenderComment
+	// BadgeData, if set, provides caller-computed urgency per thread position.
+	// When nil, all badges default to BadgeUnread.
+	BadgeData map[CommentKey]BadgeInfo
+	// BadgesOnly, when true, suppresses CommentThreadItem insertion and only
+	// attaches badges to DiffLineItems. Callers set this when a comment panel
+	// is available for reading thread content.
+	BadgesOnly bool
 }
 
 // CommentKey identifies a comment thread position.
@@ -169,18 +176,19 @@ func BuildRenderList(diffLines []DiffLine, comments []github.ReviewComment, opts
 		opt = opts[0]
 	}
 
-	placed := make(map[commentKey]bool)
+	placedThread := make(map[commentKey]bool)
+	placedBadge := make(map[commentKey]bool)
 
 	// Helper: try to place a thread for a given key after diff line i.
 	tryPlace := func(items []Renderable, i int, ck commentKey, parentLT LineType) []Renderable {
-		if ck.Line <= 0 || placed[ck] {
+		if ck.Line <= 0 || placedThread[ck] {
 			return items
 		}
 		rendered := renderThread(ck, commentsByLine, opt)
 		if len(rendered) == 0 {
 			return items
 		}
-		placed[ck] = true
+		placedThread[ck] = true
 		ct := NewCommentThreadItem(i, ck.Side, ck.Line, rendered, parentLT)
 		ct.Highlighted = ck.Line == opt.HighlightThreadLine && ck.Side == opt.HighlightThreadSide
 		if ct.Highlighted {
@@ -189,25 +197,81 @@ func BuildRenderList(diffLines []DiffLine, comments []github.ReviewComment, opts
 		return append(items, ct)
 	}
 
+	// Helper: attach a badge to a DiffLineItem for a comment position.
+	// Aggregates across multiple calls (LEFT+RIGHT on context lines).
+	tryBadge := func(item *DiffLineItem, ck commentKey) {
+		if ck.Line <= 0 || placedBadge[ck] {
+			return
+		}
+		thread := renderThread(ck, commentsByLine, opt)
+		if len(thread) == 0 {
+			return
+		}
+		placedBadge[ck] = true
+		count := len(thread)
+		urgency := BadgeUnread // default
+		working := false
+		pk := CommentKey{Side: ck.Side, Line: ck.Line}
+		if opt.BadgeData != nil {
+			if bi, ok := opt.BadgeData[pk]; ok {
+				count = bi.Count
+				urgency = bi.Urgency
+				working = bi.Working
+			}
+		}
+		if len(opt.PendingComments[pk]) > 0 {
+			working = true
+		}
+		badge := item.Badge
+		if badge == nil {
+			badge = &CommentBadge{TotalCount: count, MaxUrgency: urgency, Working: working, Keys: []CommentKey{pk}}
+		} else {
+			badge.TotalCount += count
+			if urgency > badge.MaxUrgency {
+				badge.MaxUrgency = urgency
+			}
+			badge.Working = badge.Working || working
+			badge.Keys = append(badge.Keys, pk)
+		}
+		item.SetBadge(badge)
+	}
+
 	items := make([]Renderable, 0, len(diffLines))
 	for i := range diffLines {
 		dl := &diffLines[i]
-		items = append(items, NewDiffLineItem(i, dl))
+		dli := NewDiffLineItem(i, dl)
+		items = append(items, dli)
 
 		switch dl.Type {
 		case LineHunk:
-			// Allow comments to attach to hunk headers (e.g. copilot summaries).
 			if h, ok := ParseHunkHeader(dl.Content); ok && h.NewStart > 0 {
-				items = tryPlace(items, i, commentKey{Side: "RIGHT", Line: h.NewStart}, dl.Type)
+				ck := commentKey{Side: "RIGHT", Line: h.NewStart}
+				tryBadge(dli, ck)
+				if !opt.BadgesOnly {
+					items = tryPlace(items, i, ck, dl.Type)
+				}
 			}
 		case LineDel:
-			items = tryPlace(items, i, commentKey{Side: "LEFT", Line: dl.OldLineNo}, dl.Type)
+			ck := commentKey{Side: "LEFT", Line: dl.OldLineNo}
+			tryBadge(dli, ck)
+			if !opt.BadgesOnly {
+				items = tryPlace(items, i, ck, dl.Type)
+			}
 		case LineContext:
-			// Context lines carry both old and new numbers — check both sides.
-			items = tryPlace(items, i, commentKey{Side: "RIGHT", Line: dl.NewLineNo}, dl.Type)
-			items = tryPlace(items, i, commentKey{Side: "LEFT", Line: dl.OldLineNo}, dl.Type)
+			ckR := commentKey{Side: "RIGHT", Line: dl.NewLineNo}
+			ckL := commentKey{Side: "LEFT", Line: dl.OldLineNo}
+			tryBadge(dli, ckR)
+			tryBadge(dli, ckL)
+			if !opt.BadgesOnly {
+				items = tryPlace(items, i, ckR, dl.Type)
+				items = tryPlace(items, i, ckL, dl.Type)
+			}
 		default:
-			items = tryPlace(items, i, commentKey{Side: "RIGHT", Line: dl.NewLineNo}, dl.Type)
+			ck := commentKey{Side: "RIGHT", Line: dl.NewLineNo}
+			tryBadge(dli, ck)
+			if !opt.BadgesOnly {
+				items = tryPlace(items, i, ck, dl.Type)
+			}
 		}
 	}
 
@@ -237,6 +301,14 @@ func CommentsForThread(allComments []github.ReviewComment, side string, line int
 	threads := buildCommentThreads(allComments)
 	key := commentKey{Side: side, Line: line}
 	return threads[key]
+}
+
+// ThreadIsResolved is a placeholder for resolved-thread detection.
+// For local comments, the CommentStore already filters out resolved threads.
+// For PR comments, the resolution state is available on the GraphQL thread.
+// In both cases, if the thread's comments are present, it is not resolved.
+func ThreadIsResolved(_ []github.ReviewComment) bool {
+	return false
 }
 
 // BuildThreadedRenderComments threads ReviewComments by position and converts

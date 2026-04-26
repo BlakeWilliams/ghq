@@ -12,6 +12,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/blakewilliams/gg/internal/github"
 	"github.com/blakewilliams/gg/internal/review/agents"
@@ -36,6 +37,16 @@ type LayoutInfo struct {
 	// panel when HelpMode is on. Empty disables the row.
 	HelpLine string
 	HelpMode bool
+
+	// ScrollOverride, when set, replaces the diff viewport scrollbar with
+	// custom values (e.g. panel scroll in fullscreen mode).
+	ScrollOverride *ScrollOverride
+}
+
+// ScrollOverride provides custom total/offset for the scrollbar indicator.
+type ScrollOverride struct {
+	Total  int // total number of content lines
+	Offset int // current scroll offset
 }
 
 // helpFooterRows returns the number of rows the help footer steals from
@@ -92,6 +103,7 @@ type DiffViewer struct {
 	CommentSide         string
 	CommentStartLine    int
 	CommentStartSide    string
+	ReplyMode           components.ReplyMode
 
 	// Copilot state
 	Agent        *agents.Client
@@ -106,6 +118,10 @@ type DiffViewer struct {
 
 	// Render lists per file (structural render items).
 	FileRenderers []*components.FileRenderList
+
+	// FileBadgeData holds per-position badge data for each file.
+	// Shared between the file tree (aggregated) and diff view (per-position).
+	FileBadgeData []map[components.CommentKey]components.BadgeInfo
 
 	// Loading spinner (shown while highlighting is in progress for current file).
 	Spinner       spinner.Model
@@ -137,6 +153,21 @@ type DiffViewer struct {
 	// Hunk expansion state — persists across reloads.
 	// Key: filename → original HunkInfo → total lines revealed.
 	ExpandedHunks map[string]map[components.HunkInfo]int
+
+	// BadgesOnly suppresses inline CommentThreadItem rendering in favor of
+	// badge pills on diff lines. Set by callers that use the new comment UI.
+	BadgesOnly bool
+
+	// Comment panel state. Panel identity is stored so the panel can be
+	// rebuilt when comment data changes (e.g. FormatFile).
+	PanelOpen    bool
+	PanelFocused bool   // true when the comment panel column has keyboard focus
+	PanelFile    string // filename of the thread shown in the panel
+	PanelSide      string // "LEFT" or "RIGHT"
+	PanelLine      int    // source line number (end line)
+	PanelStartLine int    // start line for multi-line selections (0 = single line)
+	PanelScroll    int    // scroll offset into panel content lines
+	Panel        *components.CommentPanel
 }
 
 // CommentSource provides comments for a file. Each view implements this
@@ -177,6 +208,25 @@ type BlockSource interface {
 
 // --- Layout helpers ---
 
+// maxCommentPanelWidth caps the panel so it doesn't dominate the screen.
+const maxCommentPanelWidth = 100
+
+// commentPanelMinWidth returns the configured minimum or the default.
+func (d DiffViewer) commentPanelMinWidth() int {
+	if d.Ctx.Config.CommentPanelMinWidth > 0 {
+		return d.Ctx.Config.CommentPanelMinWidth
+	}
+	return 55
+}
+
+// diffMinWidth returns the configured minimum or the default.
+func (d DiffViewer) diffMinWidth() int {
+	if d.Ctx.Config.DiffMinWidth > 0 {
+		return d.Ctx.Config.DiffMinWidth
+	}
+	return 90
+}
+
 func (d DiffViewer) RightPanelWidth() int {
 	return d.Width - d.Tree.Width
 }
@@ -187,6 +237,80 @@ func (d DiffViewer) RightPanelInnerWidth() int {
 
 func (d DiffViewer) ContentWidth() int {
 	return d.RightPanelInnerWidth() - 1 // -1 for scrollbar column
+}
+
+// CommentPanelWidth returns the width available for the comment panel.
+// Returns 0 if the terminal is too narrow for a side panel (fallback needed).
+func (d DiffViewer) CommentPanelWidth() int {
+	if !d.PanelOpen {
+		return 0
+	}
+	minPanel := d.commentPanelMinWidth()
+	minDiff := d.diffMinWidth()
+	// Layout: [diff (diffW)] [scroll (1)] [sep (1)] [panel (panelW)]
+	// Total = innerRightW = diffW + 1 + 1 + panelW
+	available := d.RightPanelInnerWidth() - minDiff - 2
+	if available < minPanel {
+		return 0 // too narrow, use fallback
+	}
+	maxPanel := maxCommentPanelWidth
+	if maxPanel < minPanel {
+		maxPanel = minPanel
+	}
+	if available > maxPanel {
+		return maxPanel
+	}
+	return available
+}
+
+// DiffContentWidth returns the width of the diff content area when the panel
+// is open. When the panel is closed, returns ContentWidth().
+func (d DiffViewer) DiffContentWidth() int {
+	panelW := d.CommentPanelWidth()
+	if panelW == 0 {
+		return d.ContentWidth()
+	}
+	// diff = innerRightW - panelW - 2 (scroll + sep)
+	return d.RightPanelInnerWidth() - panelW - 2
+}
+
+// NeedsFallbackView returns true when the panel is open but the terminal
+// is too narrow for a side panel.
+func (d DiffViewer) NeedsFallbackView() bool {
+	return d.PanelOpen && d.CommentPanelWidth() == 0
+}
+
+// PanelRenderWidth returns the width available for the panel content.
+// In side-panel mode this is CommentPanelWidth(); in fullscreen it's ContentWidth().
+func (d DiffViewer) PanelRenderWidth() int {
+	if pw := d.CommentPanelWidth(); pw > 0 {
+		return pw
+	}
+	return d.ContentWidth()
+}
+
+// IsDiffFocused returns true when the diff content pane has keyboard focus
+// (i.e. neither tree nor comment panel is focused).
+func (d DiffViewer) IsDiffFocused() bool {
+	return !d.Tree.Focused && !d.PanelFocused
+}
+
+// NormalizeFocus ensures PanelFocused is only set when the panel is actually
+// visible. In side-panel mode, clears focus if the terminal shrinks below the
+// minimum. In fullscreen mode, the panel is always visible so focus stays.
+func (d *DiffViewer) NormalizeFocus() {
+	if !d.PanelOpen {
+		d.PanelFocused = false
+		return
+	}
+	// Fullscreen mode: panel replaces the diff view, always visible.
+	if d.NeedsFallbackView() {
+		return
+	}
+	// Side panel mode: clear focus if panel column doesn't fit.
+	if d.PanelFocused && d.CommentPanelWidth() == 0 {
+		d.PanelFocused = false
+	}
 }
 
 func (d DiffViewer) ViewportHeight() int {
@@ -204,6 +328,316 @@ func (d DiffViewer) helpRowCount() int {
 
 func (d DiffViewer) BorderStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(d.Ctx.DiffColors.BorderColor)
+}
+
+// OpenPanelForThread opens the comment panel for a specific thread.
+func (d *DiffViewer) OpenPanelForThread(file, side string, line int) {
+	d.PanelOpen = true
+	d.PanelFile = file
+	d.PanelSide = side
+	d.PanelLine = line
+	d.PanelScroll = 0
+	d.RefreshPanel()
+	d.ScrollPanel(999999)
+	d.PanelFocused = true
+}
+
+// OpenPanelForNewComment opens the comment panel in compose mode for a line
+// that doesn't have an existing thread yet.
+func (d *DiffViewer) OpenPanelForNewComment(file, side string, line, startLine int) {
+	d.PanelOpen = true
+	d.PanelFile = file
+	d.PanelSide = side
+	d.PanelLine = line
+	d.PanelStartLine = startLine
+	d.PanelScroll = 0
+	d.PanelFocused = true
+	d.Panel = &components.CommentPanel{
+		FilePath:   file,
+		Side:       side,
+		Line:       line,
+		DiffContext: d.panelDiffContext(),
+		Width:      d.PanelRenderWidth(),
+		RenderBody: d.RenderBody,
+		Colors:     d.Ctx.DiffColors,
+	}
+}
+
+
+
+// ClosePanel closes the comment panel.
+func (d *DiffViewer) ClosePanel() {
+	d.PanelOpen = false
+	d.PanelFocused = false
+	d.PanelFile = ""
+	d.PanelSide = ""
+	d.PanelLine = 0
+	d.PanelStartLine = 0
+	d.PanelScroll = 0
+	d.Panel = nil
+}
+
+// PanelViewHeight returns the number of visible rows available for panel
+// content. This is the content area height (total height minus chrome rows
+// and help rows).
+func (d DiffViewer) PanelViewHeight() int {
+	h := d.Height - 2 - d.helpRowCount() // header + separator + help
+	if h < 1 {
+		h = 1
+	}
+	return h
+}
+
+// ScrollPanel adjusts the panel scroll offset by delta lines, clamping to
+// valid bounds.
+func (d *DiffViewer) ScrollPanel(delta int) {
+	if d.Panel == nil {
+		return
+	}
+	totalLines := d.Panel.ContentLines()
+	viewH := d.PanelViewHeight()
+	maxScroll := totalLines - viewH
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	d.PanelScroll += delta
+	if d.PanelScroll < 0 {
+		d.PanelScroll = 0
+	}
+	if d.PanelScroll > maxScroll {
+		d.PanelScroll = maxScroll
+	}
+}
+
+// SyncPanelReplyView updates the panel's ReplyView from the textarea
+// when composing, and adjusts textarea width to match the current panel width.
+func (d *DiffViewer) SyncPanelReplyView() {
+	if d.Panel == nil {
+		return
+	}
+	if d.Composing && d.PanelOpen {
+		w := d.PanelRenderWidth() - 4 // padding
+		if w < 10 {
+			w = 10
+		}
+		d.CommentInput.SetWidth(w)
+		d.Panel.ReplyView = d.CommentInput.View()
+		d.Panel.ReplyMode = d.ReplyMode
+		d.Panel.HelpMode = d.Ctx.Config.HelpMode
+	} else {
+		d.Panel.ReplyView = ""
+	}
+}
+
+// PanelAtBottom returns true when the panel scroll is at or near the bottom.
+func (d *DiffViewer) PanelAtBottom() bool {
+	if d.Panel == nil {
+		return true
+	}
+	totalLines := d.Panel.ContentLines()
+	viewH := d.PanelViewHeight()
+	maxScroll := totalLines - viewH
+	if maxScroll <= 0 {
+		return true
+	}
+	return d.PanelScroll >= maxScroll-1
+}
+
+// RefreshPanel rebuilds the panel content from current comment data.
+// Called after comment data changes (FormatFile, new comments, etc).
+func (d *DiffViewer) RefreshPanel() {
+	if !d.PanelOpen || d.PanelFile == "" {
+		return
+	}
+	// Remember if we were pinned to the bottom before rebuilding.
+	wasAtBottom := d.PanelAtBottom()
+	fileComments := d.CommentsForFile(d.PanelFile)
+	threadComments := components.CommentsForThread(fileComments, d.PanelSide, d.PanelLine)
+	if len(threadComments) == 0 {
+		if !d.Composing {
+			d.ClosePanel()
+			return
+		}
+		// Composing a new comment — rebuild panel with just diff context.
+		d.Panel = &components.CommentPanel{
+			FilePath:   d.PanelFile,
+			Side:       d.PanelSide,
+			Line:       d.PanelLine,
+			DiffContext: d.panelDiffContext(),
+			Width:      d.PanelRenderWidth(),
+			RenderBody: d.RenderBody,
+			Colors:     d.Ctx.DiffColors,
+		}
+		if wasAtBottom {
+			d.ScrollPanel(999999)
+		}
+		return
+	}
+
+	// Extract multi-line start from the root comment.
+	root := threadComments[0]
+	d.PanelStartLine = 0
+	if d.PanelSide == "LEFT" {
+		if root.OriginalStartLine != nil && *root.OriginalStartLine > 0 {
+			d.PanelStartLine = *root.OriginalStartLine
+		}
+	} else {
+		if root.StartLine != nil && *root.StartLine > 0 {
+			d.PanelStartLine = *root.StartLine
+		}
+	}
+
+	var renderComments []components.RenderComment
+	blockLookup := d.blocksForFile(d.PanelFile)
+	if blockLookup != nil {
+		threaded := components.BuildThreadedRenderComments(fileComments, blockLookup)
+		pk := components.CommentKey{Side: d.PanelSide, Line: d.PanelLine}
+		renderComments = threaded[pk]
+	}
+	if len(renderComments) == 0 {
+		renderComments = components.ReviewCommentsToRender(threadComments)
+	}
+	// Merge pending copilot comments.
+	if pending := d.CopilotState.PendingRenderComments(d.PanelFile); len(pending) > 0 {
+		pk := components.CommentKey{Side: d.PanelSide, Line: d.PanelLine}
+		if p := pending[pk]; len(p) > 0 {
+			renderComments = append(renderComments, p...)
+		}
+	}
+
+	d.Panel = &components.CommentPanel{
+		Comments:    renderComments,
+		FilePath:    d.PanelFile,
+		Side:        d.PanelSide,
+		Line:        d.PanelLine,
+		Resolved:    components.ThreadIsResolved(threadComments),
+		DiffContext:  d.panelDiffContext(),
+		Width:       d.PanelRenderWidth(),
+		RenderBody:  d.RenderBody,
+		Colors:      d.Ctx.DiffColors,
+	}
+
+	// If we were at the bottom, stay at the bottom after new content arrives.
+	if wasAtBottom {
+		d.ScrollPanel(999999)
+	}
+}
+
+// panelDiffContext extracts rendered diff lines for the panel's comment range.
+// For multi-line selections (PanelStartLine > 0), it renders from start to end line.
+// For single-line comments, it shows up to 2 context lines before the target.
+func (d *DiffViewer) panelDiffContext() []string {
+	fileIdx := d.FileIndexForPath(d.PanelFile)
+	if fileIdx < 0 || fileIdx >= len(d.FileRenderers) || d.FileRenderers[fileIdx] == nil {
+		return nil
+	}
+	if fileIdx >= len(d.FileDiffs) {
+		return nil
+	}
+
+	list := d.FileRenderers[fileIdx]
+	rc := d.renderContext(d.FileDiffs[fileIdx])
+
+	// Find the diff line index that matches PanelSide + PanelLine (end line).
+	targetIdx := -1
+	startIdx := -1
+	for _, item := range list.Items {
+		dli, ok := item.(*components.DiffLineItem)
+		if !ok || dli.DiffLine == nil {
+			continue
+		}
+		dl := dli.DiffLine
+		lineNo := dl.NewLineNo
+		if d.PanelSide == "LEFT" {
+			lineNo = dl.OldLineNo
+		}
+		if d.PanelStartLine > 0 && lineNo == d.PanelStartLine && startIdx < 0 {
+			startIdx = dli.DiffIdx()
+		}
+		if lineNo == d.PanelLine {
+			targetIdx = dli.DiffIdx()
+			break
+		}
+	}
+	if targetIdx < 0 {
+		return nil
+	}
+
+	// For multi-line selections, render exactly the selected range.
+	// For single-line comments, show up to 2 context lines before.
+	if startIdx >= 0 && startIdx < targetIdx {
+		// Use the multi-line start directly.
+	} else {
+		const contextBefore = 2
+		startIdx = targetIdx - contextBefore
+	}
+	if startIdx < 0 {
+		startIdx = 0
+	}
+
+	var lines []string
+	for i := startIdx; i <= targetIdx; i++ {
+		dli := list.DiffLineItemAt(i)
+		if dli == nil {
+			continue
+		}
+		rendered := dli.Render(rc)
+		rendered = strings.TrimRight(rendered, "\n")
+		lines = append(lines, rendered)
+	}
+	return lines
+}
+
+// NextBadgeDiffIdx returns the diff line index of the next line with a badge
+// after from. Wraps around. Returns -1 if no badges exist.
+func (d DiffViewer) NextBadgeDiffIdx(from int) int {
+	idx := d.CurrentFileIdx
+	if idx < 0 || idx >= len(d.FileRenderers) || d.FileRenderers[idx] == nil {
+		return -1
+	}
+	list := d.FileRenderers[idx]
+	first := -1
+	for _, item := range list.Items {
+		dli, ok := item.(*components.DiffLineItem)
+		if !ok || dli.Badge == nil {
+			continue
+		}
+		di := dli.DiffIdx()
+		if first < 0 {
+			first = di
+		}
+		if di > from {
+			return di
+		}
+	}
+	return first // wrap around
+}
+
+// PrevBadgeDiffIdx returns the diff line index of the previous line with a
+// badge before from. Wraps around. Returns -1 if no badges exist.
+func (d DiffViewer) PrevBadgeDiffIdx(from int) int {
+	idx := d.CurrentFileIdx
+	if idx < 0 || idx >= len(d.FileRenderers) || d.FileRenderers[idx] == nil {
+		return -1
+	}
+	list := d.FileRenderers[idx]
+	last := -1
+	candidate := -1
+	for _, item := range list.Items {
+		dli, ok := item.(*components.DiffLineItem)
+		if !ok || dli.Badge == nil {
+			continue
+		}
+		di := dli.DiffIdx()
+		last = di
+		if di < from {
+			candidate = di
+		}
+	}
+	if candidate >= 0 {
+		return candidate
+	}
+	return last // wrap around
 }
 
 func (d DiffViewer) AuthorName() string {
@@ -463,18 +897,31 @@ func (d DiffViewer) RenderLayout(rightView string, rightTitle string, info Layou
 	dim := lipgloss.NewStyle().Foreground(lipgloss.BrightBlack)
 	bold := lipgloss.NewStyle().Bold(true)
 
-	// Active panel gets bright title, inactive gets dim.
-	var treeTitleStyle, rightTitleStyle lipgloss.Style
+	// Determine which pane is focused for header styling.
+	bright := bold.Foreground(lipgloss.BrightWhite)
+	treeTitleStyle := dim
+	diffTitleStyle := dim
+	panelTitleStyle := dim
 	if d.Tree.Focused {
-		treeTitleStyle = bold.Foreground(lipgloss.BrightWhite)
-		rightTitleStyle = dim
+		treeTitleStyle = bright
+	} else if d.PanelFocused {
+		panelTitleStyle = bright
 	} else {
-		treeTitleStyle = dim
-		rightTitleStyle = bold.Foreground(lipgloss.BrightWhite)
+		diffTitleStyle = bright
 	}
 
 	sep := chrome.Render("│")
 	rightW := d.RightPanelWidth()
+
+	// Pre-compute side panel geometry so header can use it.
+	innerRightW := rightW - 1
+	panelW := d.CommentPanelWidth()
+	hasSidePanel := panelW > 0
+	diffHeaderW := innerRightW // width available for the diff header
+	if hasSidePanel {
+		// diffContent + scroll(1) + sep(1) + panel
+		diffHeaderW = d.DiffContentWidth() + 1 // +1 for scroll column
+	}
 
 	// === Header: left panel ===
 	// " N Files ... MODE_TEXT "
@@ -505,18 +952,18 @@ func (d DiffViewer) RenderLayout(rightView string, rightTitle string, info Layou
 	}
 	treeHeader := " " + treeLabel + strings.Repeat(" ", treeHeaderPad) + modeLabel
 
-	// === Header: right panel ===
-	// " dir/filename ... +N -M  PR #42  ◀ 42% "
+	// === Header: right (diff) panel ===
+	// " dir/filename ... +N -M "
 	var rightLabel string
 	var rightTrailer string // right-aligned: stats + PR + scroll
 	if rightTitle == "Overview" {
-		rightLabel = rightTitleStyle.Render("Overview")
+		rightLabel = diffTitleStyle.Render("Overview")
 	} else {
 		dir, file := path.Split(rightTitle)
 		if dir != "" {
-			rightLabel = dim.Render(dir) + rightTitleStyle.Render(file)
+			rightLabel = dim.Render(dir) + diffTitleStyle.Render(file)
 		} else {
-			rightLabel = rightTitleStyle.Render(rightTitle)
+			rightLabel = diffTitleStyle.Render(rightTitle)
 		}
 	}
 
@@ -548,23 +995,60 @@ func (d DiffViewer) RenderLayout(rightView string, rightTitle string, info Layou
 
 	rightLabelW := lipgloss.Width(rightLabel)
 	rightTrailerW := lipgloss.Width(rightTrailer)
-	rightHeaderGap := rightW - 2 - rightLabelW - rightTrailerW // -2 for leading/trailing space
-	if rightHeaderGap < 0 {
-		rightHeaderGap = 0
+	diffHdrGap := diffHeaderW - 2 - rightLabelW - rightTrailerW // -2 for leading/trailing space
+	if diffHdrGap < 0 {
+		diffHdrGap = 0
 	}
-	rightHeader := " " + rightLabel + strings.Repeat(" ", rightHeaderGap) + rightTrailer + " "
-	headerLine := treeHeader + sep + rightHeader
+	diffHeader := " " + rightLabel + strings.Repeat(" ", diffHdrGap) + rightTrailer + " "
+
+	// === Header: comment panel (when visible) ===
+	var headerLine string
+	if hasSidePanel {
+		commentCount := 0
+		if d.Panel != nil {
+			commentCount = len(d.Panel.Comments)
+		}
+		var countText string
+		if commentCount == 1 {
+			countText = "1 Comment"
+		} else {
+			countText = fmt.Sprintf("%d Comments", commentCount)
+		}
+		panelLabel := panelTitleStyle.Render(countText)
+		panelLabelW := lipgloss.Width(panelLabel)
+		panelHdrPad := panelW - 1 - panelLabelW // -1 for leading space
+		if panelHdrPad < 0 {
+			panelHdrPad = 0
+		}
+		panelHeader := " " + panelLabel + strings.Repeat(" ", panelHdrPad)
+		headerLine = treeHeader + sep + diffHeader + sep + panelHeader
+	} else {
+		headerLine = treeHeader + sep + diffHeader
+	}
 
 	// Separator row: thin horizontal rule.
 	treeFill := treeW - 1
 	if treeFill < 0 {
 		treeFill = 0
 	}
-	rightFill := rightW - 1
-	if rightFill < 0 {
-		rightFill = 0
+	var separatorLine string
+	if hasSidePanel {
+		diffFill := diffHeaderW
+		if diffFill < 0 {
+			diffFill = 0
+		}
+		panelFill := panelW
+		if panelFill < 0 {
+			panelFill = 0
+		}
+		separatorLine = chrome.Render(strings.Repeat("─", treeFill) + "┼" + strings.Repeat("─", diffFill) + "┼" + strings.Repeat("─", panelFill))
+	} else {
+		rightFill := rightW - 1
+		if rightFill < 0 {
+			rightFill = 0
+		}
+		separatorLine = chrome.Render(strings.Repeat("─", treeFill) + "┼" + strings.Repeat("─", rightFill))
 	}
-	separatorLine := chrome.Render(strings.Repeat("─", treeFill) + "┼" + strings.Repeat("─", rightFill))
 
 	// Content area.
 	contentH := d.Height - chromeRows
@@ -584,14 +1068,18 @@ func (d DiffViewer) RenderLayout(rightView string, rightTitle string, info Layou
 	tree.Width = treeW - 1
 	tree.Height = contentH - 2 - copilotFooterRows // tree loses rows for footer(s)
 	tree.CurrentFileIdx = d.CurrentFileIdx
+	tree.AnimFrame = d.CopilotState.Dots
 	treeContentLines := tree.View()
 	rightLines := strings.Split(rightView, "\n")
-
-	innerRightW := rightW - 1
 
 	// Scrollbar: compute thumb position and size. The viewport content
 	// lives in (contentH - helpRows) rows on the right side.
 	totalLines := d.VP.TotalLineCount()
+	scrollOffset := d.VP.YOffset()
+	if info.ScrollOverride != nil {
+		totalLines = info.ScrollOverride.Total
+		scrollOffset = info.ScrollOverride.Offset
+	}
 	vpH := contentH - helpRows
 	var thumbStart, thumbLen int
 	if totalLines <= vpH || totalLines == 0 {
@@ -604,16 +1092,36 @@ func (d DiffViewer) RenderLayout(rightView string, rightTitle string, info Layou
 			thumbLen = 1
 		}
 		scrollable := totalLines - vpH
-		offset := d.VP.YOffset()
-		if offset > scrollable {
-			offset = scrollable
+		if scrollOffset > scrollable {
+			scrollOffset = scrollable
 		}
-		thumbStart = offset * (vpH - thumbLen) / scrollable
+		thumbStart = scrollOffset * (vpH - thumbLen) / scrollable
 	}
 	// Scrollbar styles: track matches border color, thumb slightly lighter.
 	trackChar := chrome.Render("│")
 	thumbColor := uictx.BrightnessModify(chromeClr, 40)
 	thumbChar := lipgloss.NewStyle().Foreground(thumbColor).Render("┃")
+
+	// Content width for the diff area (used for help line, etc.)
+	contentW := innerRightW - 1 // -1 for scrollbar column
+
+	// Pre-render panel lines if the side panel fits.
+	diffW := contentW
+	var panelLines []string
+	if hasSidePanel {
+		diffW = d.DiffContentWidth()
+		d.Panel.Width = panelW
+		d.Panel.ChromeColor = chromeClr
+		d.SyncPanelReplyView()
+		panelContent := d.Panel.View()
+		panelLines = strings.Split(strings.TrimRight(panelContent, "\n"), "\n")
+		// Apply panel scroll offset.
+		if d.PanelScroll > 0 && d.PanelScroll < len(panelLines) {
+			panelLines = panelLines[d.PanelScroll:]
+		} else if d.PanelScroll >= len(panelLines) {
+			panelLines = nil
+		}
+	}
 
 	var b strings.Builder
 	b.WriteString(headerLine)
@@ -699,23 +1207,33 @@ func (d DiffViewer) RenderLayout(rightView string, rightTitle string, info Layou
 		}
 
 		rl := ""
-		contentW := innerRightW - 1 // -1 for scrollbar column
+
+		// Use narrower diff width when side panel is active.
+		rowW := contentW
+		if hasSidePanel {
+			rowW = diffW
+		}
+
 		var scrollCol string
 		if helpRows > 0 && i == contentH-helpRows {
 			// Separator row above the help line.
-			rl = chrome.Render(strings.Repeat("─", contentW))
+			rl = chrome.Render(strings.Repeat("─", rowW))
 			scrollCol = " "
 		} else if helpRows > 0 && i > contentH-helpRows {
 			// Right-pane help footer row.
-			rl = renderHelpLine(info.HelpLine, contentW, dim)
+			rl = renderHelpLine(info.HelpLine, rowW, dim)
 			scrollCol = " "
 		} else {
 			if i < len(rightLines) {
 				rl = rightLines[i]
 			}
 			rlW := lipgloss.Width(rl)
-			if rlW < contentW {
-				rl += strings.Repeat(" ", contentW-rlW)
+			if rlW > rowW {
+				rl = ansi.Truncate(rl, rowW, "")
+				rlW = lipgloss.Width(rl)
+			}
+			if rlW < rowW {
+				rl += strings.Repeat(" ", rowW-rlW)
 			}
 			if thumbStart < 0 {
 				scrollCol = " "
@@ -726,7 +1244,24 @@ func (d DiffViewer) RenderLayout(rightView string, rightTitle string, info Layou
 			}
 		}
 
-		b.WriteString(leftPart + sep + rl + scrollCol)
+		// Compose: tree + sep + diff + scroll [+ panelSep + panel]
+		if hasSidePanel {
+			panelLine := ""
+			if i < len(panelLines) {
+				panelLine = panelLines[i]
+			}
+			plW := lipgloss.Width(panelLine)
+			if plW > panelW {
+				panelLine = ansi.Truncate(panelLine, panelW, "")
+				plW = lipgloss.Width(panelLine)
+			}
+			if plW < panelW {
+				panelLine += strings.Repeat(" ", panelW-plW)
+			}
+			b.WriteString(leftPart + sep + rl + scrollCol + sep + panelLine)
+		} else {
+			b.WriteString(leftPart + sep + rl + scrollCol)
+		}
 		if i < contentH-1 {
 			b.WriteString("\n")
 		}
@@ -785,7 +1320,7 @@ func (d *DiffViewer) renderContext(diffLines []components.DiffLine) components.R
 	}
 
 	return components.RenderContext{
-		Width:          d.ContentWidth(),
+		Width:          d.DiffContentWidth(),
 		Colors:         d.Ctx.DiffColors,
 		ColW:           colW,
 		RenderBody:     d.RenderBody,
@@ -847,8 +1382,12 @@ func (d *DiffViewer) FormatFile(index int) {
 	fileComments := d.CommentsForFile(filename)
 
 	var opts components.DiffFormatOptions
+	opts.BadgesOnly = d.BadgesOnly
 	if d.RenderBody != nil {
 		opts.RenderBody = d.RenderBody
+	}
+	if d.FileBadgeData != nil && index < len(d.FileBadgeData) {
+		opts.BadgeData = d.FileBadgeData[index]
 	}
 	if pending := d.CopilotState.PendingRenderComments(filename); len(pending) > 0 {
 		opts.PendingComments = pending
@@ -868,6 +1407,11 @@ func (d *DiffViewer) FormatFile(index int) {
 		d.FileRenderers[index] = components.BuildRenderList(diffLines, fileComments, opts)
 		rc := d.renderContext(diffLines)
 		d.syncFromRenderList(index, rc)
+	}
+
+	// Refresh the comment panel if it's showing a thread from this file.
+	if d.PanelOpen && d.PanelFile == filename {
+		d.RefreshPanel()
 	}
 }
 
@@ -1402,6 +1946,7 @@ func (d *DiffViewer) InitFileSlices(n int) {
 	d.FileDiffs = make([][]components.DiffLine, n)
 	d.FileDiffOffsets = make([][]int, n)
 	d.FileRenderers = make([]*components.FileRenderList, n)
+	d.FileBadgeData = make([]map[components.CommentKey]components.BadgeInfo, n)
 }
 
 // HunkDiffText returns the full diff text for the hunk at diffLineIdx
@@ -1506,13 +2051,32 @@ const (
 func (d *DiffViewer) HandleNavKey(key string) KeyResult {
 	switch key {
 	case "f":
-		d.Tree.Focused = !d.Tree.Focused
+		if d.PanelFocused {
+			// Panel → diff.
+			d.PanelFocused = false
+			d.Tree.Focused = false
+		} else {
+			d.Tree.Focused = !d.Tree.Focused
+		}
 		return KeyHandled
 	case "h", "left":
+		if d.PanelFocused {
+			d.PanelFocused = false
+			d.Tree.Focused = false
+			return KeyHandled
+		}
 		d.Tree.Focused = true
 		return KeyHandled
 	case "l", "right":
-		d.Tree.Focused = false
+		if d.Tree.Focused {
+			d.Tree.Focused = false
+			return KeyHandled
+		}
+		// From diff → panel (only when side panel is visible).
+		if d.PanelOpen && d.CommentPanelWidth() > 0 && !d.PanelFocused {
+			d.PanelFocused = true
+			return KeyHandled
+		}
 		return KeyHandled
 	case "j", "down":
 		if d.Tree.Focused {

@@ -62,6 +62,36 @@
   require.NoError(t, err)
   ```
 
+## Comments
+
+- **DON'T** add inline comments that merely restate what the code already says — especially trailing comments on const/var declarations that just echo the name, type, or value. If the code is clear, leave it uncommented.
+
+  ```
+  // Bad: restating what is obvious from the code
+  BadgeRead     BadgeUrgency = iota // BrightBlack — read, no action needed
+  BadgeResolved                     // Cyan — resolved thread
+
+  // Good: the names and godoc on the type speak for themselves
+  BadgeRead     BadgeUrgency = iota
+  BadgeResolved
+  ```
+
+- **DON'T** add banner/separator comments (lines of dashes, equals signs, or similar decorations used to visually divide sections). Use godoc comments on the declarations themselves; the code structure provides its own organization.
+
+  ```
+  // Bad: banner-style section dividers
+  // ---------------------------------------------------------------------------
+  // Badge urgency
+  // ---------------------------------------------------------------------------
+
+  // BadgeUrgency represents the visual priority of a comment badge.
+  type BadgeUrgency int
+
+  // Good: let the godoc comment stand on its own
+  // BadgeUrgency represents the visual priority of a comment badge.
+  type BadgeUrgency int
+  ```
+
 ## ANSI String Manipulation
 
 - **BEWARE** every `\033[0m` reset kills the current background color. When composing styled content with nested ANSI sequences (e.g. tool group rows inside comment thread borders), re-inject the background escape after each reset.

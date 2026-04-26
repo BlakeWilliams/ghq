@@ -136,3 +136,32 @@ func TestBodyFromBlocks(t *testing.T) {
 		t.Errorf("BodyFromBlocks = %q", got)
 	}
 }
+
+func TestThreadHasCopilotComment(t *testing.T) {
+	store := &CommentStore{
+		Comments: []LocalComment{
+			{ID: "root-1", Author: "you", Path: "main.go", Line: 10, Side: "RIGHT"},
+			{ID: "reply-1", InReplyToID: "root-1", Author: "copilot"},
+			{ID: "root-2", Author: "you", Path: "main.go", Line: 20, Side: "RIGHT"},
+			{ID: "reply-2", InReplyToID: "root-2", Author: "you"},
+		},
+	}
+
+	// Thread with copilot reply
+	if !store.ThreadHasCopilotComment("root-1") {
+		t.Error("expected ThreadHasCopilotComment to return true for root-1")
+	}
+	// Thread without copilot
+	if store.ThreadHasCopilotComment("root-2") {
+		t.Error("expected ThreadHasCopilotComment to return false for root-2")
+	}
+	// Copilot as root comment
+	store.Comments = append(store.Comments, LocalComment{ID: "root-3", Author: "copilot"})
+	if !store.ThreadHasCopilotComment("root-3") {
+		t.Error("expected ThreadHasCopilotComment to return true for root-3")
+	}
+	// Non-existent thread
+	if store.ThreadHasCopilotComment("nonexistent") {
+		t.Error("expected ThreadHasCopilotComment to return false for nonexistent")
+	}
+}

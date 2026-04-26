@@ -98,6 +98,12 @@ func (c *Client) SendPrompt(commentID, prompt string) tea.Cmd {
 	}
 }
 
+// Send sends a pre-built prompt synchronously. Use this when already inside
+// a tea.Cmd goroutine instead of creating a nested Cmd via SendPrompt.
+func (c *Client) Send(commentID, prompt string) error {
+	return c.agent.Send(commentID, prompt)
+}
+
 // Drain returns all buffered events from the underlying agent.
 func (c *Client) Drain() []AgentEvent {
 	return c.agent.Drain()

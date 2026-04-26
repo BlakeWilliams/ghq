@@ -54,6 +54,27 @@ func HasStagedChanges(dir string) bool {
 	return cmd.Run() != nil // exit 1 means there are changes
 }
 
+// HasUnstagedChanges returns true if there are unstaged modifications
+// or untracked files in the working tree.
+func HasUnstagedChanges(dir string) bool {
+	cmd := exec.Command("git", "-C", dir, "status", "--porcelain")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return len(strings.TrimSpace(string(out))) > 0
+}
+
+// StageAll stages all working tree changes (git add -A).
+func StageAll(dir string) error {
+	cmd := exec.Command("git", "-C", dir, "add", "-A")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git add -A: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
 // HasUnpushedCommits returns true if the current branch has commits not yet pushed.
 func HasUnpushedCommits(dir string) bool {
 	cmd := exec.Command("git", "-C", dir, "log", "--oneline", "@{u}..HEAD")

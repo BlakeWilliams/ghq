@@ -81,6 +81,7 @@ type Renderable interface {
 type DiffLineItem struct {
 	diffLineIdx int
 	DiffLine    *DiffLine
+	Badge       *CommentBadge // optional badge pill on the right edge
 
 	// Cached render state
 	content   string
@@ -117,6 +118,11 @@ func (d *DiffLineItem) Invalidate() {
 	d.width = 0
 	d.content = ""
 	d.lineCount = 0
+}
+
+func (d *DiffLineItem) SetBadge(b *CommentBadge) {
+	d.Badge = b
+	d.Invalidate()
 }
 
 func (d *DiffLineItem) render(rc RenderContext) {
@@ -188,6 +194,11 @@ func (d *DiffLineItem) render(rc RenderContext) {
 	}
 
 	segments := wrapRenderedLine(rendered, rc.Width, d.DiffLine.Type, rc.Colors, gutterW, wrapBg)
+
+	// Overlay badge pill on the first visual segment if present.
+	if d.Badge != nil && d.Badge.TotalCount > 0 && len(segments) > 0 {
+		segments[0] = OverlayBadge(segments[0], d.Badge, effectiveBg, rc.Width, rc.AnimFrame, rc.Colors)
+	}
 
 	d.content = strings.Join(segments, "\n") + "\n"
 	d.lineCount = len(segments)
@@ -327,6 +338,15 @@ func (f *FileRenderList) BuildDiffLineMap() {
 			f.diffLineMap[dli.diffLineIdx] = dli
 		}
 	}
+}
+
+// DiffLineItemAt returns the DiffLineItem for the given diff line index,
+// or nil if not found.
+func (f *FileRenderList) DiffLineItemAt(diffLineIdx int) *DiffLineItem {
+	if f == nil {
+		return nil
+	}
+	return f.diffLineMap[diffLineIdx]
 }
 
 // InvalidateLines marks specific diff lines as dirty so they re-render

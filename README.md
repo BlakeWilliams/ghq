@@ -12,10 +12,10 @@ Interactive local diffs. Review, stage, and polish your changes with agents. Thi
 ## Install
 
 ```
-go install github.com/blakewilliams/gg/cmd/gg@latest
+cargo install --git https://github.com/BlakeWilliams/ghq gg
 ```
 
-Requires Go 1.25+ and a GitHub token (via the `gh` CLI or `GITHUB_TOKEN` env var).
+Requires Rust nightly and a GitHub token (via the `gh` CLI or `GITHUB_TOKEN` env var).
 
 ## Usage
 
@@ -52,3 +52,5 @@ Just run `gg` in a branch with changes.
 Press `?` for the full list of keybindings.
 
 testing, please ignore
+
+hello

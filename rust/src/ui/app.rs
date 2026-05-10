@@ -20,9 +20,10 @@ use crate::agent::copilot::CopilotAgent;
 use crate::agent::types::AgentEvent;
 use crate::config::Config;
 use crate::git::diff::DiffMode;
+use crate::git::watcher::{RepoWatcher, WatchEvent};
 use crate::github::CachedClient;
 
-use super::local_diff::{LocalDiff, Pane};
+use super::local_diff::{DiffLoaded, LocalDiff, Pane};
 use super::styles::DiffColors;
 
 pub enum ActiveView {
@@ -44,6 +45,7 @@ pub struct App {
     pub size: Rect,
     pub agent: Arc<dyn AgentRunner>,
     ctrl_c_count: u8,
+    diff_rx: mpsc::UnboundedReceiver<DiffLoaded>,
 }
 
 impl App {
@@ -56,9 +58,11 @@ impl App {
         github: CachedClient,
     ) -> Self {
         let diff_colors = DiffColors::default();
+        let (diff_tx, diff_rx) = mpsc::unbounded_channel();
         let mut local_diff = LocalDiff::new(
             repo_root.clone(),
             DiffMode::Working,
+            diff_tx,
         );
         local_diff.base_branch = branch.clone();
         let agent: Arc<dyn AgentRunner> = Arc::new(CopilotAgent::new(repo_root.clone()));
@@ -78,6 +82,7 @@ impl App {
             size: Rect::default(),
             agent,
             ctrl_c_count: 0,
+            diff_rx,
         }
     }
 
@@ -135,8 +140,20 @@ impl App {
             }
         });
 
-        // Load initial diff
-        self.local_diff.load_diff().await;
+        // Load initial diff (non-blocking — result arrives via diff_rx)
+        self.local_diff.load_diff();
+
+        let (watch_tx, watch_rx) = mpsc::unbounded_channel();
+        let _watcher = match RepoWatcher::new(&self.repo_root, watch_tx) {
+            Ok(w) => {
+                tracing::info!("File watcher started");
+                Some(w)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to start file watcher: {e}");
+                None
+            }
+        };
 
         // Fetch authenticated user in background
         if let Ok(user) = self.github.authenticated_user().await {
@@ -144,7 +161,7 @@ impl App {
             self.local_diff.username = Some(user.login);
         }
 
-        let result = self.event_loop(&mut terminal, agent_events).await;
+        let result = self.event_loop(&mut terminal, agent_events, watch_rx).await;
 
         // Stop the agent
         self.agent.stop();
@@ -164,6 +181,7 @@ impl App {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
         mut agent_events: mpsc::Receiver<AgentEvent>,
+        mut watch_events: mpsc::UnboundedReceiver<WatchEvent>,
     ) -> Result<()> {
         // Event-driven loop: only redraws when something requests it. A `Notify`
         // coalesces multiple redraw requests within a frame into a single draw.
@@ -173,7 +191,7 @@ impl App {
         let mut term_events = EventStream::new();
 
         // Animation tick for the copilot spinner. Only consumed while pending.
-        let mut anim = interval(Duration::from_millis(120));
+        let mut anim = interval(Duration::from_millis(240));
         anim.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         // Rate-limit redraws to ~120 fps so streaming bursts don't thrash the
@@ -239,6 +257,28 @@ impl App {
                 _ = anim.tick(), if needs_animation => {
                     self.local_diff.tick();
                     redraw.notify_one();
+                }
+
+                watch_ev = watch_events.recv() => {
+                    if let Some(ev) = watch_ev {
+                        match ev {
+                            WatchEvent::FilesChanged => {
+                                tracing::debug!("File watcher: files changed, reloading diff");
+                                self.local_diff.reload_diff();
+                            }
+                            WatchEvent::BranchChanged(branch) => {
+                                tracing::info!("File watcher: branch changed to {branch}");
+                                self.local_diff.reload_diff_with_branch(Some(branch));
+                            }
+                        }
+                    }
+                }
+
+                diff_result = self.diff_rx.recv() => {
+                    if let Some(result) = diff_result {
+                        self.local_diff.apply_diff_loaded(result).await;
+                        redraw.notify_one();
+                    }
                 }
             }
         }

@@ -25,7 +25,7 @@ pub enum CommentAuthor {
 #[serde(tag = "type")]
 pub enum ContentBlock {
     Text { content: String },
-    ToolGroup { tools: Vec<ToolEntry> },
+    ToolGroup { label: String, tools: Vec<ToolEntry> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,8 +74,33 @@ impl CommentStore {
     }
 
     pub fn resolve(&mut self, root_id: &str, resolved: bool) -> anyhow::Result<()> {
+        // Collect all comment IDs in the thread using the same multi-pass logic as thread_comments
+        let mut ids_in_thread: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        ids_in_thread.insert(root_id.to_string());
+
+        // Multiple passes to catch nested replies (depth > 1)
+        loop {
+            let mut added = false;
+            for c in &self.comments {
+                if ids_in_thread.contains(&c.id) {
+                    continue;
+                }
+                if let Some(parent) = &c.in_reply_to_id {
+                    if ids_in_thread.contains(parent) {
+                        ids_in_thread.insert(c.id.clone());
+                        added = true;
+                    }
+                }
+            }
+            if !added {
+                break;
+            }
+        }
+
+        // Mark all comments in the thread
         for c in &mut self.comments {
-            if c.id == root_id || c.in_reply_to_id.as_deref() == Some(root_id) {
+            if ids_in_thread.contains(&c.id) {
                 c.resolved = resolved;
             }
         }
@@ -91,10 +116,36 @@ impl CommentStore {
     }
 
     pub fn thread_comments(&self, root_id: &str) -> Vec<&LocalComment> {
+        // Collect all comments in the thread by walking the reply chain.
+        // A comment belongs to the thread if its id IS root_id, or if
+        // any ancestor in_reply_to_id chain reaches root_id.
+        let mut ids_in_thread: std::collections::HashSet<&str> =
+            std::collections::HashSet::new();
+        ids_in_thread.insert(root_id);
+
+        // Multiple passes to catch nested replies (depth > 1)
+        loop {
+            let mut added = false;
+            for c in &self.comments {
+                if ids_in_thread.contains(c.id.as_str()) {
+                    continue;
+                }
+                if let Some(parent) = &c.in_reply_to_id {
+                    if ids_in_thread.contains(parent.as_str()) {
+                        ids_in_thread.insert(&c.id);
+                        added = true;
+                    }
+                }
+            }
+            if !added {
+                break;
+            }
+        }
+
         let mut thread: Vec<&LocalComment> = self
             .comments
             .iter()
-            .filter(|c| c.id == root_id || c.in_reply_to_id.as_deref() == Some(root_id))
+            .filter(|c| ids_in_thread.contains(c.id.as_str()))
             .collect();
         thread.sort_by(|a, b| a.created_at.cmp(&b.created_at));
         thread
@@ -104,6 +155,15 @@ impl CommentStore {
         self.comments
             .iter()
             .filter(|c| c.path == path && !c.resolved)
+            .collect()
+    }
+
+    /// Returns root comments for a file, grouped by (side, line).
+    /// Only returns the root of each thread (no replies).
+    pub fn root_threads_for_file(&self, path: &str) -> Vec<&LocalComment> {
+        self.comments
+            .iter()
+            .filter(|c| c.path == path && !c.resolved && c.in_reply_to_id.is_none())
             .collect()
     }
 }
@@ -157,6 +217,21 @@ mod tests {
     }
 
     #[test]
+    fn thread_comments_includes_nested_replies() {
+        let mut store = memory_store();
+        // root → user reply → copilot reply (nested 2 deep)
+        store.comments.push(make_comment("c1", "root", CommentAuthor::You, None));
+        store.comments.push(make_comment("c2", "user reply", CommentAuthor::You, Some("c1")));
+        store.comments.push(make_comment("c3", "copilot reply", CommentAuthor::Copilot, Some("c2")));
+
+        let thread = store.thread_comments("c1");
+        assert_eq!(thread.len(), 3);
+        assert_eq!(thread[0].id, "c1");
+        assert_eq!(thread[1].id, "c2");
+        assert_eq!(thread[2].id, "c3");
+    }
+
+    #[test]
     fn find_thread_root_follows_chain() {
         let mut store = memory_store();
         store.comments.push(make_comment("c1", "root", CommentAuthor::You, None));
@@ -196,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_marks_thread() {
+    fn resolve_marks_direct_replies() {
         let mut store = memory_store();
         store.comments.push(make_comment("c1", "root", CommentAuthor::You, None));
         store.comments.push(make_comment("c2", "reply", CommentAuthor::Copilot, Some("c1")));
@@ -209,5 +284,89 @@ mod tests {
         }
 
         assert!(store.comments.iter().all(|c| c.resolved));
+    }
+
+    #[test]
+    fn resolve_marks_nested_replies() {
+        let mut store = memory_store();
+        // root → user reply → copilot reply (nested 2 deep)
+        store.comments.push(make_comment("c1", "root", CommentAuthor::You, None));
+        store.comments.push(make_comment("c2", "user reply", CommentAuthor::You, Some("c1")));
+        store.comments.push(make_comment("c3", "copilot reply", CommentAuthor::Copilot, Some("c2")));
+
+        // Simulate resolve using the new multi-pass logic
+        let mut ids_in_thread: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        ids_in_thread.insert("c1".to_string());
+
+        loop {
+            let mut added = false;
+            for c in &store.comments {
+                if ids_in_thread.contains(&c.id) {
+                    continue;
+                }
+                if let Some(parent) = &c.in_reply_to_id {
+                    if ids_in_thread.contains(parent) {
+                        ids_in_thread.insert(c.id.clone());
+                        added = true;
+                    }
+                }
+            }
+            if !added {
+                break;
+            }
+        }
+
+        for c in &mut store.comments {
+            if ids_in_thread.contains(&c.id) {
+                c.resolved = true;
+            }
+        }
+
+        assert_eq!(store.comments.len(), 3);
+        assert!(store.comments.iter().all(|c| c.resolved), "All comments in nested thread should be resolved");
+    }
+
+    #[test]
+    fn resolve_deeply_nested_thread() {
+        let mut store = memory_store();
+        // Create a deep chain: c1 → c2 → c3 → c4 → c5
+        store.comments.push(make_comment("c1", "root", CommentAuthor::You, None));
+        store.comments.push(make_comment("c2", "reply 1", CommentAuthor::Copilot, Some("c1")));
+        store.comments.push(make_comment("c3", "reply 2", CommentAuthor::You, Some("c2")));
+        store.comments.push(make_comment("c4", "reply 3", CommentAuthor::Copilot, Some("c3")));
+        store.comments.push(make_comment("c5", "reply 4", CommentAuthor::You, Some("c4")));
+
+        // Simulate resolve using the new multi-pass logic
+        let mut ids_in_thread: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        ids_in_thread.insert("c1".to_string());
+
+        loop {
+            let mut added = false;
+            for c in &store.comments {
+                if ids_in_thread.contains(&c.id) {
+                    continue;
+                }
+                if let Some(parent) = &c.in_reply_to_id {
+                    if ids_in_thread.contains(parent) {
+                        ids_in_thread.insert(c.id.clone());
+                        added = true;
+                    }
+                }
+            }
+            if !added {
+                break;
+            }
+        }
+
+        for c in &mut store.comments {
+            if ids_in_thread.contains(&c.id) {
+                c.resolved = true;
+            }
+        }
+
+        assert_eq!(store.comments.len(), 5);
+        assert!(store.comments.iter().all(|c| c.resolved), "All comments in deeply nested thread should be resolved");
     }
 }

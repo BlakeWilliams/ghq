@@ -1,6 +1,7 @@
 pub mod commit;
 pub mod diff;
 pub mod stage;
+pub mod watcher;
 
 use std::path::Path;
 

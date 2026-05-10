@@ -5,13 +5,15 @@ use std::sync::Arc;
 use crossterm::event::KeyEvent;
 use ratatui::layout::Rect;
 use ratatui::Frame;
+use tokio::sync::mpsc;
 
 use crate::agent::AgentRunner;
 use crate::agent::types::AgentEvent;
 use crate::git::diff::{self, DiffMode};
-use crate::review::comments::{CommentAuthor, CommentStore, ContentBlock, LocalComment};
+use crate::github::types::PullRequestFile;
+use crate::review::comments::{CommentAuthor, CommentStore, ContentBlock, LocalComment, ToolEntry};
 use super::composing_state::ComposingState;
-use super::copilot_state::{CopilotState, CompletedReply};
+use super::copilot_state::{CopilotState, CompletedReply, ToolCall, ToolGroup, ToolStatus};
 use super::diff_viewer::{DiffLineData, DiffViewer, LayoutInfo, LineType, TREE_WIDTH};
 use super::diff_viewer::panel::{self, PanelComment};
 use super::styles::DiffColors;
@@ -20,6 +22,20 @@ pub enum Pane {
     Tree,
     Diff,
     Panel,
+}
+
+/// Result of a background diff load. Delivered via channel to avoid blocking
+/// the event loop while git subprocesses run.
+pub enum DiffLoaded {
+    /// Initial load or mode switch — resets cursor/scroll.
+    Full {
+        files: Vec<PullRequestFile>,
+    },
+    /// File-watcher reload — preserves cursor/scroll position.
+    Reload {
+        files: Vec<PullRequestFile>,
+        branch: Option<String>,
+    },
 }
 
 pub struct LocalDiff {
@@ -31,10 +47,11 @@ pub struct LocalDiff {
     pub comment_store: CommentStore,
     pub copilot_state: CopilotState,
     pub username: Option<String>,
+    pub diff_tx: mpsc::UnboundedSender<DiffLoaded>,
 }
 
 impl LocalDiff {
-    pub fn new(repo_root: String, mode: DiffMode) -> Self {
+    pub fn new(repo_root: String, mode: DiffMode, diff_tx: mpsc::UnboundedSender<DiffLoaded>) -> Self {
         let comment_store = CommentStore::new(&repo_root, "");
         Self {
             viewer: DiffViewer::new(mode),
@@ -45,21 +62,69 @@ impl LocalDiff {
             comment_store,
             copilot_state: CopilotState::new(),
             username: None,
+            diff_tx,
         }
     }
 
-    pub async fn load_diff(&mut self) {
-        let raw = match diff::diff(&self.repo_root, self.mode, &self.base_branch).await {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::error!("Failed to load diff: {e}");
-                return;
-            }
-        };
+    /// Spawn a background task to load the diff. Results arrive via `diff_tx`.
+    pub fn load_diff(&self) {
+        let repo_root = self.repo_root.clone();
+        let mode = self.mode;
+        let base_branch = self.base_branch.clone();
+        let tx = self.diff_tx.clone();
+        tokio::spawn(async move {
+            let raw = match diff::diff(&repo_root, mode, &base_branch).await {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::error!("Failed to load diff: {e}");
+                    return;
+                }
+            };
+            let files = diff::parse_diff_to_files(&raw);
+            let _ = tx.send(DiffLoaded::Full { files });
+        });
+    }
 
-        let files = diff::parse_diff_to_files(&raw);
-        self.viewer.set_files(files);
-        self.sync_tree_cursor();
+    /// Spawn a background task to reload the diff (preserves position).
+    pub fn reload_diff(&self) {
+        self.reload_diff_with_branch(None);
+    }
+
+    /// Spawn a background reload, optionally updating the base branch.
+    pub fn reload_diff_with_branch(&self, new_branch: Option<String>) {
+        let repo_root = self.repo_root.clone();
+        let mode = self.mode;
+        let base_branch = new_branch.as_deref().unwrap_or(&self.base_branch).to_string();
+        let tx = self.diff_tx.clone();
+        let branch = new_branch;
+        tokio::spawn(async move {
+            let raw = match diff::diff(&repo_root, mode, &base_branch).await {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::error!("Failed to reload diff: {e}");
+                    return;
+                }
+            };
+            let files = diff::parse_diff_to_files(&raw);
+            let _ = tx.send(DiffLoaded::Reload { files, branch });
+        });
+    }
+
+    /// Apply the result of a background diff load. Called from the event loop.
+    pub async fn apply_diff_loaded(&mut self, result: DiffLoaded) {
+        match result {
+            DiffLoaded::Full { files } => {
+                self.viewer.set_files(files);
+                self.sync_tree_cursor();
+            }
+            DiffLoaded::Reload { files, branch } => {
+                if let Some(b) = branch {
+                    self.base_branch = b;
+                }
+                self.viewer.update_files(files);
+                self.sync_tree_cursor();
+            }
+        }
         self.refresh_current_file().await;
     }
 
@@ -85,6 +150,42 @@ impl LocalDiff {
 
         self.viewer
             .set_diff_lines(diff_lines, &filename, &new_content, &old_content);
+
+        self.place_file_comments(&filename);
+    }
+
+    /// Insert comment thread markers into the render list for the given file.
+    fn place_file_comments(&mut self, filename: &str) {
+        use crate::ui::diff_viewer::render_list::CommentPosition;
+
+        let roots: Vec<CommentPosition> = self
+            .comment_store
+            .root_threads_for_file(filename)
+            .into_iter()
+            .map(|c| {
+                let count = self.comment_store.thread_comments(&c.id).len();
+                CommentPosition {
+                    comment_id: c.id.clone(),
+                    side: c.side.clone(),
+                    line: c.line,
+                    count,
+                }
+            })
+            .collect();
+
+        let pending: Vec<CommentPosition> = self
+            .copilot_state
+            .pending_for_file(filename)
+            .into_iter()
+            .map(|(id, p)| CommentPosition {
+                comment_id: id.to_string(),
+                side: p.side.clone(),
+                line: p.line,
+                count: 1,
+            })
+            .collect();
+
+        self.viewer.render_list.place_comments(&roots, &pending);
     }
 
     pub fn resize(&mut self, width: u16, height: u16) {
@@ -166,15 +267,44 @@ impl LocalDiff {
             tracing::info!("Copilot reply complete for {}", comment_id);
             self.handle_completed_reply(reply);
             self.refresh_panel_for_thread(&comment_id);
+            // Re-place comments to update thread counts and remove pending markers
+            let filename = self.current_filename();
+            self.place_file_comments(&filename);
         } else {
             self.refresh_panel_streaming(&comment_id);
         }
     }
 
     fn handle_completed_reply(&mut self, reply: CompletedReply) {
+        use crate::ui::copilot_state::ContentBlock as CopilotBlock;
+
+        // Convert copilot_state blocks to stored comment blocks
+        let blocks: Vec<ContentBlock> = reply
+            .blocks
+            .iter()
+            .map(|b| match b {
+                CopilotBlock::Text(text) => ContentBlock::Text {
+                    content: text.clone(),
+                },
+                CopilotBlock::ToolGroup(g) => ContentBlock::ToolGroup {
+                    label: g.label.clone(),
+                    tools: g
+                        .tools
+                        .iter()
+                        .map(|t| ToolEntry {
+                            name: t.name.clone(),
+                            args: t.args_summary.clone(),
+                            result: None,
+                            done: t.status != crate::ui::copilot_state::ToolStatus::Running,
+                        })
+                        .collect(),
+                },
+            })
+            .collect();
+
         let comment = LocalComment {
             id: format!("copilot-{}", uuid_v4()),
-            body: reply.body.clone(),
+            body: reply.body,
             author: CommentAuthor::Copilot,
             in_reply_to_id: Some(reply.comment_id),
             path: reply.path,
@@ -182,34 +312,39 @@ impl LocalDiff {
             side: reply.side,
             resolved: false,
             created_at: chrono_now(),
-            blocks: vec![ContentBlock::Text {
-                content: reply.body,
-            }],
+            blocks,
         };
         let _ = self.comment_store.add(comment);
     }
 
     fn refresh_panel_streaming(&mut self, comment_id: &str) {
-        if let Some(display_text) = self.copilot_state.pending_display_text(comment_id) {
+        // Don't reopen the panel if user closed it
+        if !self.viewer.panel.visible {
+            return;
+        }
+
+        if let Some(display_blocks) = self.copilot_state.pending_display_blocks(comment_id) {
             let root_id = self
                 .comment_store
                 .find_thread_root(comment_id)
                 .map(|c| c.id.clone())
                 .unwrap_or_else(|| comment_id.to_string());
 
+            // Only refresh if showing this thread
+            if self.viewer.panel.thread_key.as_deref() != Some(&root_id)
+                && self.viewer.panel.thread_key.as_deref() != Some(comment_id)
+            {
+                return;
+            }
+
             let mut comments = self.build_panel_comments(&root_id);
 
-            let tool_groups = self
-                .copilot_state
-                .tool_groups(comment_id)
-                .map(|g| g.to_vec())
-                .unwrap_or_default();
             comments.push(PanelComment {
                 author: "Copilot".to_string(),
                 is_copilot: true,
-                body: display_text,
+                blocks: display_blocks,
                 is_pending: true,
-                tool_groups,
+                created_at: chrono_now(),
             });
 
             let file_path = self.current_filename();
@@ -225,6 +360,29 @@ impl LocalDiff {
     }
 
     fn refresh_panel_for_thread(&mut self, comment_id: &str) {
+        // Only refresh if the panel is already visible and showing this thread
+        if !self.viewer.panel.visible {
+            return;
+        }
+
+        let root_id = self
+            .comment_store
+            .find_thread_root(comment_id)
+            .map(|c| c.id.clone())
+            .unwrap_or_else(|| comment_id.to_string());
+
+        // Only refresh if the open thread matches
+        if self.viewer.panel.thread_key.as_deref() != Some(&root_id) {
+            return;
+        }
+
+        let comments = self.build_panel_comments(&root_id);
+        let file_path = self.current_filename();
+        self.viewer.panel.open_thread(root_id, comments, file_path);
+    }
+
+    /// Open a thread in the panel (unconditionally — used for explicit user actions).
+    pub fn open_panel_for_thread(&mut self, comment_id: &str) {
         let root_id = self
             .comment_store
             .find_thread_root(comment_id)
@@ -237,20 +395,57 @@ impl LocalDiff {
     }
 
     fn build_panel_comments(&self, root_id: &str) -> Vec<PanelComment> {
+        use crate::ui::copilot_state::ContentBlock as PanelBlock;
+
         let you_name = self.username.as_deref().unwrap_or("You");
         self.comment_store
             .thread_comments(root_id)
             .into_iter()
-            .map(|c| PanelComment {
-                author: match &c.author {
-                    CommentAuthor::You => you_name.to_string(),
-                    CommentAuthor::Copilot => "Copilot".to_string(),
-                    CommentAuthor::GitHub(name) => name.clone(),
-                },
-                is_copilot: matches!(c.author, CommentAuthor::Copilot),
-                body: c.body.clone(),
-                is_pending: false,
-                tool_groups: Vec::new(),
+            .map(|c| {
+                // Convert stored ContentBlocks to panel ContentBlocks
+                let blocks: Vec<PanelBlock> = if c.blocks.is_empty() {
+                    if !c.body.is_empty() {
+                        vec![PanelBlock::Text(c.body.clone())]
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    c.blocks
+                        .iter()
+                        .map(|b| match b {
+                            ContentBlock::Text { content } => PanelBlock::Text(content.clone()),
+                            ContentBlock::ToolGroup { label, tools } => {
+                                PanelBlock::ToolGroup(ToolGroup {
+                                    label: label.clone(),
+                                    tools: tools
+                                        .iter()
+                                        .map(|t| ToolCall {
+                                            name: t.name.clone(),
+                                            args_summary: t.args.clone(),
+                                            status: if t.done {
+                                                ToolStatus::Done
+                                            } else {
+                                                ToolStatus::Running
+                                            },
+                                        })
+                                        .collect(),
+                                })
+                            }
+                        })
+                        .collect()
+                };
+
+                PanelComment {
+                    author: match &c.author {
+                        CommentAuthor::You => you_name.to_string(),
+                        CommentAuthor::Copilot => "Copilot".to_string(),
+                        CommentAuthor::GitHub(name) => name.clone(),
+                    },
+                    is_copilot: matches!(c.author, CommentAuthor::Copilot),
+                    blocks,
+                    is_pending: false,
+                    created_at: c.created_at.clone(),
+                }
             })
             .collect()
     }
@@ -266,16 +461,35 @@ impl LocalDiff {
     pub fn tick(&mut self) {
         if self.copilot_state.has_pending() {
             self.copilot_state.advance_dots();
+            self.viewer.dots_frame = self.viewer.dots_frame.wrapping_add(1);
 
-            // Refresh panel if it's showing a thread with pending copilot replies
+            // Refresh panel if it's showing a thread with any pending copilot reply
             if self.viewer.panel.visible {
                 if let Some(thread_key) = self.viewer.panel.thread_key.clone() {
-                    if self.copilot_state.is_pending(&thread_key) {
-                        self.refresh_panel_streaming(&thread_key);
+                    // Find any pending comment that belongs to this thread
+                    if let Some(pending_id) = self.find_pending_for_thread(&thread_key) {
+                        self.refresh_panel_streaming(&pending_id);
                     }
                 }
             }
         }
+    }
+
+    /// Find a pending copilot comment ID whose thread root matches `thread_key`.
+    fn find_pending_for_thread(&self, thread_key: &str) -> Option<String> {
+        for pending_id in self.copilot_state.pending_ids() {
+            // Check if this pending ID itself IS the thread key
+            if pending_id == thread_key {
+                return Some(pending_id.to_string());
+            }
+            // Check if the thread root of this pending comment matches
+            if let Some(root) = self.comment_store.find_thread_root(pending_id) {
+                if root.id == thread_key {
+                    return Some(pending_id.to_string());
+                }
+            }
+        }
+        None
     }
 
     pub async fn submit_comment(&mut self, agent: &Arc<dyn AgentRunner>) {
@@ -317,19 +531,29 @@ impl LocalDiff {
         );
 
         self.copilot_state
-            .set_pending(comment_id.clone(), path, line, side);
+            .set_pending(comment_id.clone(), path.clone(), line, side);
+
+        // Re-place comment threads in the render list
+        self.place_file_comments(&path);
+
+        // Resolve the root thread for panel display
+        let root_id = self
+            .comment_store
+            .find_thread_root(&comment_id)
+            .map(|c| c.id.clone())
+            .unwrap_or_else(|| comment_id.clone());
 
         // Show thread with pending indicator immediately
-        let mut comments = self.build_panel_comments(&comment_id);
+        let mut comments = self.build_panel_comments(&root_id);
         comments.push(PanelComment {
             author: "Copilot".to_string(),
             is_copilot: true,
-            body: "Thinking...".to_string(),
+            blocks: vec![crate::ui::copilot_state::ContentBlock::Text("Thinking...".to_string())],
             is_pending: true,
-            tool_groups: Vec::new(),
+            created_at: chrono_now(),
         });
         let file_path = self.current_filename();
-        self.viewer.panel.open_thread(comment_id.clone(), comments, file_path);
+        self.viewer.panel.open_thread(root_id.clone(), comments, file_path);
         self.viewer.panel_focused = true;
         self.viewer.tree_focused = false;
 
@@ -337,16 +561,16 @@ impl LocalDiff {
         if let Err(e) = agent.send(&comment_id, &prompt).await {
             tracing::error!("Failed to send to copilot: {e}");
             // Show error in panel
-            let mut comments = self.build_panel_comments(&comment_id);
+            let mut comments = self.build_panel_comments(&root_id);
             comments.push(PanelComment {
                 author: "Copilot".to_string(),
                 is_copilot: true,
-                body: format!("⚠ {e}"),
+                blocks: vec![crate::ui::copilot_state::ContentBlock::Text(format!("⚠ {e}"))],
                 is_pending: false,
-                tool_groups: Vec::new(),
+                created_at: chrono_now(),
             });
             let file_path = self.current_filename();
-            self.viewer.panel.open_thread(comment_id, comments, file_path);
+            self.viewer.panel.open_thread(root_id, comments, file_path);
         }
     }
 
@@ -487,6 +711,7 @@ fn parse_patch_to_diff_lines(patch: &str) -> Vec<DiffLineData> {
                 old_line_no: None,
                 new_line_no: None,
                 highlighted: Vec::new(),
+                badge: None,
             });
         } else if let Some(rest) = line.strip_prefix('+') {
             lines.push(DiffLineData {
@@ -495,6 +720,7 @@ fn parse_patch_to_diff_lines(patch: &str) -> Vec<DiffLineData> {
                 old_line_no: None,
                 new_line_no: Some(new_num),
                 highlighted: Vec::new(),
+                badge: None,
             });
             new_num += 1;
         } else if let Some(rest) = line.strip_prefix('-') {
@@ -504,6 +730,7 @@ fn parse_patch_to_diff_lines(patch: &str) -> Vec<DiffLineData> {
                 old_line_no: Some(old_num),
                 new_line_no: None,
                 highlighted: Vec::new(),
+                badge: None,
             });
             old_num += 1;
         } else if let Some(rest) = line.strip_prefix(' ') {
@@ -513,6 +740,7 @@ fn parse_patch_to_diff_lines(patch: &str) -> Vec<DiffLineData> {
                 old_line_no: Some(old_num),
                 new_line_no: Some(new_num),
                 highlighted: Vec::new(),
+                badge: None,
             });
             old_num += 1;
             new_num += 1;
@@ -523,6 +751,7 @@ fn parse_patch_to_diff_lines(patch: &str) -> Vec<DiffLineData> {
                 old_line_no: Some(old_num),
                 new_line_no: Some(new_num),
                 highlighted: Vec::new(),
+                badge: None,
             });
             old_num += 1;
             new_num += 1;

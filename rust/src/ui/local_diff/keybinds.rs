@@ -19,6 +19,11 @@ pub async fn handle_key(
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
+    // Reset waiting_g on any key that isn't 'g'
+    if key.code != KeyCode::Char('g') || ctrl {
+        local_diff.viewer.waiting_g = false;
+    }
+
     match key.code {
         // Pane focus: h → left, l → right (tree ↔ diff ↔ panel)
         KeyCode::Char('h') | KeyCode::Left if !ctrl => {
@@ -104,22 +109,19 @@ pub async fn handle_key(
                 local_diff.viewer.panel_focused = false;
             } else if !local_diff.viewer.render_list.is_empty() {
                 let cursor = local_diff.viewer.diff_cursor;
-                let item = local_diff.viewer.render_list.get(cursor);
-                match item {
-                    Some(crate::ui::diff_viewer::RenderItem::CommentThread(t)) => {
-                        // Open panel for this thread
-                        let thread_key = t.thread_key.clone();
-                        local_diff.refresh_panel_for_thread(&thread_key);
-                        local_diff.viewer.panel_focused = true;
-                        local_diff.viewer.tree_focused = false;
-                    }
-                    Some(crate::ui::diff_viewer::RenderItem::DiffLine(dl)) => {
-                        let filename = local_diff.current_filename();
-                        let line = dl.new_line_no.or(dl.old_line_no).unwrap_or(0);
-                        let side = if dl.new_line_no.is_some() { "RIGHT" } else { "LEFT" };
-                        local_diff.composing.start_new(filename, line, side.to_string());
-                    }
-                    None => {}
+                // Check if this diff line has a badge — open thread panel
+                if let Some(badge) = local_diff.viewer.render_list.badge_at(cursor) {
+                    let thread_key = badge.thread_key.clone();
+                    local_diff.open_panel_for_thread(&thread_key);
+                    local_diff.viewer.panel_focused = true;
+                    local_diff.viewer.tree_focused = false;
+                } else if let Some(crate::ui::diff_viewer::RenderItem::DiffLine(dl)) =
+                    local_diff.viewer.render_list.get(cursor)
+                {
+                    let filename = local_diff.current_filename();
+                    let line = dl.new_line_no.or(dl.old_line_no).unwrap_or(0);
+                    let side = if dl.new_line_no.is_some() { "RIGHT" } else { "LEFT" };
+                    local_diff.composing.start_new(filename, line, side.to_string());
                 }
             }
         }
@@ -158,19 +160,23 @@ pub async fn handle_key(
             }
         }
 
-        // Top/bottom
+        // Top (gg — vim-style double tap)
         KeyCode::Char('g') if !ctrl => {
-            if local_diff.viewer.panel_focused {
-                local_diff.viewer.panel.scroll_offset = 0;
-            } else if local_diff.viewer.tree_focused {
-                // Jump to first non-directory entry
-                let first_file = local_diff.viewer.tree_entries
-                    .iter()
-                    .position(|e| !e.is_dir)
-                    .unwrap_or(0);
-                local_diff.viewer.tree_cursor = first_file;
+            if local_diff.viewer.waiting_g {
+                local_diff.viewer.waiting_g = false;
+                if local_diff.viewer.panel_focused {
+                    local_diff.viewer.panel.scroll_offset = 0;
+                } else if local_diff.viewer.tree_focused {
+                    let first_file = local_diff.viewer.tree_entries
+                        .iter()
+                        .position(|e| !e.is_dir)
+                        .unwrap_or(0);
+                    local_diff.viewer.tree_cursor = first_file;
+                } else {
+                    local_diff.viewer.goto_top();
+                }
             } else {
-                local_diff.viewer.goto_top();
+                local_diff.viewer.waiting_g = true;
             }
         }
         KeyCode::Char('G') => {
@@ -192,7 +198,7 @@ pub async fn handle_key(
         // Mode cycling
         KeyCode::Char('m') => {
             local_diff.cycle_mode();
-            local_diff.load_diff().await;
+            local_diff.load_diff();
         }
 
         // Staging
@@ -243,15 +249,13 @@ pub async fn handle_key(
         KeyCode::Char('r') if !ctrl => {
             if !local_diff.viewer.tree_focused && !local_diff.viewer.render_list.is_empty() {
                 let cursor = local_diff.viewer.diff_cursor;
-                if let Some(thread) = local_diff.viewer.render_list.get(cursor)
-                    .and_then(|item| item.as_thread())
-                {
-                    let thread_key = thread.thread_key.clone();
+                if let Some(badge) = local_diff.viewer.render_list.badge_at(cursor) {
+                    let thread_key = badge.thread_key.clone();
                     let filename = local_diff.current_filename();
-                    let line = thread.line;
-                    let side = thread.side.clone();
+                    let line = badge.line;
+                    let side = badge.side.clone();
                     local_diff.composing.start_reply(thread_key.clone(), filename, line, side);
-                    local_diff.refresh_panel_for_thread(&thread_key);
+                    local_diff.open_panel_for_thread(&thread_key);
                 }
             }
         }
@@ -402,7 +406,7 @@ async fn stage_current_line(local_diff: &mut LocalDiff, repo_root: &str, unstage
         return;
     }
 
-    local_diff.load_diff().await;
+    local_diff.load_diff();
 }
 
 async fn stage_current_hunk(local_diff: &mut LocalDiff, repo_root: &str, unstage: bool) {
@@ -455,7 +459,7 @@ async fn stage_current_hunk(local_diff: &mut LocalDiff, repo_root: &str, unstage
         return;
     }
 
-    local_diff.load_diff().await;
+    local_diff.load_diff();
 }
 
 async fn handle_composing_key(

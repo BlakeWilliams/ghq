@@ -34,9 +34,39 @@ impl ToolGroup {
     }
 }
 
+/// A segment of a comment body. A comment is a sequence of content blocks —
+/// typically text interspersed with tool-call groups, matching Go's ContentBlock.
+#[derive(Debug, Clone)]
+pub enum ContentBlock {
+    Text(String),
+    ToolGroup(ToolGroup),
+}
+
+/// Extract a plain-text body from blocks by joining all Text segments.
+pub fn body_from_blocks(blocks: &[ContentBlock]) -> String {
+    let parts: Vec<&str> = blocks
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect();
+    parts.join("\n").trim().to_string()
+}
+
+/// Normalize blocks: if non-empty return as-is, otherwise synthesize from body.
+pub fn normalized_blocks(blocks: Vec<ContentBlock>, body: &str) -> Vec<ContentBlock> {
+    if !blocks.is_empty() {
+        return blocks;
+    }
+    if !body.is_empty() {
+        return vec![ContentBlock::Text(body.to_string())];
+    }
+    Vec::new()
+}
+
 pub struct PendingReply {
-    pub reply_buf: String,
-    pub tool_groups: Vec<ToolGroup>,
+    pub blocks: Vec<ContentBlock>,
     pub intent: String,
     pub path: String,
     pub line: i32,
@@ -46,7 +76,7 @@ pub struct PendingReply {
 pub struct CompletedReply {
     pub comment_id: String,
     pub body: String,
-    pub tool_groups: Vec<ToolGroup>,
+    pub blocks: Vec<ContentBlock>,
     pub path: String,
     pub line: i32,
     pub side: String,
@@ -70,8 +100,7 @@ impl CopilotState {
         self.pending.insert(
             comment_id,
             PendingReply {
-                reply_buf: String::new(),
-                tool_groups: Vec::new(),
+                blocks: Vec::new(),
                 intent: String::new(),
                 path,
                 line,
@@ -88,12 +117,12 @@ impl CopilotState {
         self.pending.contains_key(comment_id)
     }
 
-    pub fn reply_buf(&self, comment_id: &str) -> Option<&str> {
-        self.pending.get(comment_id).map(|p| p.reply_buf.as_str())
+    pub fn pending_ids(&self) -> impl Iterator<Item = &str> {
+        self.pending.keys().map(|s| s.as_str())
     }
 
-    pub fn tool_groups(&self, comment_id: &str) -> Option<&[ToolGroup]> {
-        self.pending.get(comment_id).map(|p| p.tool_groups.as_slice())
+    pub fn blocks(&self, comment_id: &str) -> Option<&[ContentBlock]> {
+        self.pending.get(comment_id).map(|p| p.blocks.as_slice())
     }
 
     pub fn intent(&self, comment_id: &str) -> Option<&str> {
@@ -108,16 +137,31 @@ impl CopilotState {
         ".".repeat(self.dots + 1)
     }
 
-    pub fn pending_display_text(&self, comment_id: &str) -> Option<String> {
+    /// Build display blocks for a pending reply, appending dots to the last
+    /// text block (or adding a "Thinking..." placeholder if no text yet).
+    pub fn pending_display_blocks(&self, comment_id: &str) -> Option<Vec<ContentBlock>> {
         let pending = self.pending.get(comment_id)?;
         let dots = self.dots_str();
-        if !pending.reply_buf.is_empty() {
-            Some(pending.reply_buf.clone())
-        } else if !pending.intent.is_empty() {
-            Some(format!("{}{dots}", pending.intent))
+
+        let placeholder = if !pending.intent.is_empty() {
+            pending.intent.clone()
         } else {
-            Some(format!("Thinking{dots}"))
+            "Thinking".to_string()
+        };
+
+        if pending.blocks.is_empty() {
+            return Some(vec![ContentBlock::Text(format!("{placeholder}{dots}"))]);
         }
+
+        let mut render_blocks = pending.blocks.clone();
+        let n = render_blocks.len();
+        if let Some(ContentBlock::Text(t)) = render_blocks.last_mut() {
+            t.push_str(&dots);
+        } else {
+            render_blocks.push(ContentBlock::Text(format!("{placeholder}{dots}")));
+        }
+        let _ = n; // suppress unused warning
+        Some(render_blocks)
     }
 
     pub fn pending_for_file(&self, path: &str) -> Vec<(&str, &PendingReply)> {
@@ -133,7 +177,12 @@ impl CopilotState {
             EventKind::Delta => {
                 if let EventPayload::Delta(d) = &event.payload {
                     if let Some(pending) = self.pending.get_mut(&event.comment_id) {
-                        pending.reply_buf.push_str(&d.text);
+                        // Append to last TextBlock, or create new one
+                        if let Some(ContentBlock::Text(t)) = pending.blocks.last_mut() {
+                            t.push_str(&d.text);
+                        } else {
+                            pending.blocks.push(ContentBlock::Text(d.text.clone()));
+                        }
                     }
                 }
                 None
@@ -141,7 +190,12 @@ impl CopilotState {
             EventKind::Message => {
                 if let EventPayload::Delta(d) = &event.payload {
                     if let Some(pending) = self.pending.get_mut(&event.comment_id) {
-                        pending.reply_buf = d.text.clone();
+                        // Full message replace — set as sole text block
+                        if let Some(ContentBlock::Text(t)) = pending.blocks.last_mut() {
+                            *t = d.text.clone();
+                        } else {
+                            pending.blocks.push(ContentBlock::Text(d.text.clone()));
+                        }
                     }
                 }
                 None
@@ -151,10 +205,10 @@ impl CopilotState {
                     if let Some(pending) = self.pending.get_mut(&event.comment_id) {
                         if t.tool_name == "report_intent" {
                             pending.intent = t.args_summary.clone();
-                            // Update label on current tool group
-                            if let Some(group) = pending.tool_groups.last_mut() {
+                            // Update label on current tool group block
+                            if let Some(ContentBlock::ToolGroup(g)) = pending.blocks.last_mut() {
                                 if !t.args_summary.is_empty() {
-                                    group.label = t.args_summary.clone();
+                                    g.label = t.args_summary.clone();
                                 }
                             }
                         } else {
@@ -163,13 +217,14 @@ impl CopilotState {
                                 args_summary: t.args_summary.clone(),
                                 status: ToolStatus::Running,
                             };
-                            if let Some(group) = pending.tool_groups.last_mut() {
-                                group.tools.push(tc);
+                            // Append to last ToolGroup block, or create new one
+                            if let Some(ContentBlock::ToolGroup(g)) = pending.blocks.last_mut() {
+                                g.tools.push(tc);
                             } else {
-                                pending.tool_groups.push(ToolGroup {
+                                pending.blocks.push(ContentBlock::ToolGroup(ToolGroup {
                                     label: pending.intent.clone(),
                                     tools: vec![tc],
-                                });
+                                }));
                             }
                         }
                     }
@@ -182,12 +237,14 @@ impl CopilotState {
                         return None;
                     }
                     if let Some(pending) = self.pending.get_mut(&event.comment_id) {
-                        // Find last running tool with matching name and mark done
-                        for group in pending.tool_groups.iter_mut().rev() {
-                            for tool in group.tools.iter_mut() {
-                                if tool.status == ToolStatus::Running {
-                                    tool.status = ToolStatus::Done;
-                                    return None;
+                        // Walk blocks in reverse to find the first running tool
+                        for block in pending.blocks.iter_mut().rev() {
+                            if let ContentBlock::ToolGroup(g) = block {
+                                for tool in g.tools.iter_mut() {
+                                    if tool.status == ToolStatus::Running {
+                                        tool.status = ToolStatus::Done;
+                                        return None;
+                                    }
                                 }
                             }
                         }
@@ -197,10 +254,11 @@ impl CopilotState {
             }
             EventKind::Done => {
                 let pending = self.pending.remove(&event.comment_id)?;
+                let body = body_from_blocks(&pending.blocks);
                 Some(CompletedReply {
                     comment_id: event.comment_id,
-                    body: pending.reply_buf,
-                    tool_groups: pending.tool_groups,
+                    body,
+                    blocks: pending.blocks,
                     path: pending.path,
                     line: pending.line,
                     side: pending.side,
@@ -220,7 +278,7 @@ impl CopilotState {
                 Some(CompletedReply {
                     comment_id: event.comment_id,
                     body: format!("⚠ {msg}"),
-                    tool_groups: Vec::new(),
+                    blocks: Vec::new(),
                     path,
                     line,
                     side,
@@ -265,7 +323,12 @@ mod tests {
         });
         assert!(result.is_none());
 
-        assert_eq!(state.reply_buf("c1"), Some("Hello world"));
+        let blocks = state.blocks("c1").unwrap();
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ContentBlock::Text(t) => assert_eq!(t, "Hello world"),
+            _ => panic!("expected TextBlock"),
+        }
     }
 
     #[test]
@@ -330,6 +393,57 @@ mod tests {
             }),
         });
         assert!(result.is_none());
-        assert!(state.reply_buf("unknown").is_none());
+        assert!(state.blocks("unknown").is_none());
+    }
+
+    #[test]
+    fn interleaved_tools_and_text() {
+        let mut state = CopilotState::new();
+        state.set_pending("c1".into(), "file.rs".into(), 1, "RIGHT".into());
+
+        // Tool start
+        state.handle_event(AgentEvent {
+            comment_id: "c1".into(),
+            kind: EventKind::ToolStart,
+            payload: EventPayload::Tool(ToolPayload {
+                tool_name: "read_file".into(),
+                args_summary: "main.rs".into(),
+                result: None,
+            }),
+        });
+        // Tool complete
+        state.handle_event(AgentEvent {
+            comment_id: "c1".into(),
+            kind: EventKind::ToolComplete,
+            payload: EventPayload::Tool(ToolPayload {
+                tool_name: "read_file".into(),
+                args_summary: String::new(),
+                result: None,
+            }),
+        });
+        // Text delta
+        state.handle_event(AgentEvent {
+            comment_id: "c1".into(),
+            kind: EventKind::Delta,
+            payload: EventPayload::Delta(DeltaPayload {
+                text: "Here is the fix.".into(),
+            }),
+        });
+        // Another tool start
+        state.handle_event(AgentEvent {
+            comment_id: "c1".into(),
+            kind: EventKind::ToolStart,
+            payload: EventPayload::Tool(ToolPayload {
+                tool_name: "apply_edit".into(),
+                args_summary: "main.rs".into(),
+                result: None,
+            }),
+        });
+
+        let blocks = state.blocks("c1").unwrap();
+        assert_eq!(blocks.len(), 3); // ToolGroup, Text, ToolGroup
+        assert!(matches!(&blocks[0], ContentBlock::ToolGroup(_)));
+        assert!(matches!(&blocks[1], ContentBlock::Text(t) if t == "Here is the fix."));
+        assert!(matches!(&blocks[2], ContentBlock::ToolGroup(_)));
     }
 }

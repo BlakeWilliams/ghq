@@ -48,6 +48,8 @@ pub struct DiffViewer {
     pub current_file_idx: usize,
     pub(crate) highlighter: Highlighter,
     pub panel: panel::CommentPanel,
+    pub dots_frame: usize,
+    pub waiting_g: bool,
 }
 
 fn spans_width(spans: &[Span]) -> usize {
@@ -79,6 +81,101 @@ fn truncate_str(s: &str, max_width: usize) -> String {
     result
 }
 
+/// Powerline rounded caps for badge pills.
+const BADGE_CAP_LEFT: &str = "\u{e0b6}";
+const BADGE_CAP_RIGHT: &str = "\u{e0b4}";
+const BADGE_ICON: &str = "󰆈";
+
+const BADGE_SPIN_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Overlay a comment badge pill on the right edge of a diff line's spans.
+/// Truncates the line content to make room, then appends the pill.
+fn overlay_badge(
+    spans: &mut Vec<Span<'static>>,
+    badge: &render_list::CommentBadge,
+    line_bg: Color,
+    width: usize,
+    dots_frame: &usize,
+) {
+    let pill_color = if badge.has_pending {
+        Color::Magenta
+    } else if badge.resolved {
+        Color::Cyan
+    } else {
+        Color::Yellow
+    };
+
+    let content_text = if badge.has_pending {
+        let frame = BADGE_SPIN_FRAMES[*dots_frame % BADGE_SPIN_FRAMES.len()];
+        format!("{BADGE_ICON} {frame}")
+    } else {
+        format!("{BADGE_ICON} {}", badge.count)
+    };
+
+    // Badge pill: capL + content + capR
+    // Visible width: 1 (capL) + content_w + 1 (capR) + 1 (space before)
+    let content_w = UnicodeWidthStr::width(content_text.as_str());
+    let pill_total_w = 1 + content_w + 1 + 1; // space + capL + content + capR
+
+    if pill_total_w >= width {
+        return;
+    }
+
+    // Truncate spans to make room for the badge
+    let target_w = width - pill_total_w;
+    truncate_spans(spans, target_w, line_bg);
+
+    // Append badge: space + capL(pill_color fg, line bg) + content(pill_color bg) + capR(pill_color fg, line bg)
+    spans.push(Span::styled(" ", Style::default().bg(line_bg)));
+    spans.push(Span::styled(
+        BADGE_CAP_LEFT.to_string(),
+        Style::default().fg(pill_color).bg(line_bg),
+    ));
+    spans.push(Span::styled(
+        content_text,
+        Style::default().fg(Color::Black).bg(pill_color),
+    ));
+    spans.push(Span::styled(
+        BADGE_CAP_RIGHT.to_string(),
+        Style::default().fg(pill_color).bg(line_bg),
+    ));
+}
+
+/// Truncate a vec of spans to fit within `max_width` visible columns,
+/// padding with `bg` to reach exactly `max_width`.
+fn truncate_spans(spans: &mut Vec<Span<'static>>, max_width: usize, bg: Color) {
+    use unicode_width::UnicodeWidthChar;
+
+    let mut total_w = 0;
+    let mut truncate_at: Option<(usize, usize)> = None; // (span_idx, char_offset)
+
+    'outer: for (si, span) in spans.iter().enumerate() {
+        for (ci, ch) in span.content.chars().enumerate() {
+            let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if total_w + cw > max_width {
+                truncate_at = Some((si, ci));
+                break 'outer;
+            }
+            total_w += cw;
+        }
+    }
+
+    if let Some((si, ci)) = truncate_at {
+        // Truncate span at si to ci chars
+        let truncated_content: String = spans[si].content.chars().take(ci).collect();
+        let style = spans[si].style;
+        spans.truncate(si + 1);
+        spans[si] = Span::styled(truncated_content, style);
+        total_w = spans_width(spans);
+    }
+
+    // Pad to exact width
+    let pad = max_width.saturating_sub(total_w);
+    if pad > 0 {
+        spans.push(Span::styled(" ".repeat(pad), Style::default().bg(bg)));
+    }
+}
+
 impl DiffViewer {
     pub fn new(mode: DiffMode) -> Self {
         Self {
@@ -98,6 +195,8 @@ impl DiffViewer {
             current_file_idx: 0,
             highlighter: Highlighter::new(),
             panel: panel::CommentPanel::new(),
+            dots_frame: 0,
+            waiting_g: false,
         }
     }
 
@@ -245,6 +344,43 @@ impl DiffViewer {
             .unwrap_or(0);
     }
 
+    /// Update the file list while preserving the current file, cursor, and
+    /// scroll position. Used by file-watcher reloads so the view doesn't jump.
+    pub fn update_files(&mut self, files: Vec<PullRequestFile>) {
+        // Remember current file by name (survives reordering).
+        let prev_filename = self
+            .files
+            .get(self.current_file_idx)
+            .map(|f| f.filename.clone());
+        let saved_cursor = self.diff_cursor;
+        let saved_offset = self.viewport_offset;
+
+        self.tree_entries = file_tree::build_file_tree(&files);
+        self.files = files;
+
+        // Re-resolve file index by name.
+        if let Some(ref name) = prev_filename {
+            if let Some(idx) = self.files.iter().position(|f| &f.filename == name) {
+                self.current_file_idx = idx;
+            } else {
+                // File removed from diff — clamp to valid index.
+                self.current_file_idx = 0;
+                self.diff_cursor = 0;
+                self.viewport_offset = 0;
+                self.tree_cursor = self
+                    .tree_entries
+                    .iter()
+                    .position(|e| !e.is_dir)
+                    .unwrap_or(0);
+                return;
+            }
+        }
+
+        // Restore cursor/scroll — will be clamped after diff lines are set.
+        self.diff_cursor = saved_cursor;
+        self.viewport_offset = saved_offset;
+    }
+
     fn gutter_width(&self) -> usize {
         self.render_list.gutter_width()
     }
@@ -284,13 +420,17 @@ impl DiffViewer {
 
         // Horizontal layout for content: tree | diff+scrollbar | panel(optional)
         let tree_w = TREE_WIDTH.min(area.width / 3);
+        let available_right = area.width.saturating_sub(tree_w);
         let panel_w: u16 = if self.panel.visible {
-            let eff = panel::CommentPanel::effective_width(area.width.saturating_sub(tree_w));
-            self.panel.width = eff;
-            eff
+            let pw = panel::CommentPanel::panel_width(available_right);
+            if pw > 0 {
+                self.panel.width = pw;
+            }
+            pw
         } else {
             0
         };
+        let fallback_panel = self.panel.visible && panel_w == 0;
 
         let content_cols = if panel_w > 0 {
             Layout::default()
@@ -323,16 +463,41 @@ impl DiffViewer {
         let diff_inner_w = (diff_area.width as usize).saturating_sub(1);
         let (thumb_start, thumb_len) = self.compute_scrollbar(vp_h);
 
-        // Pre-build panel lines if visible
-        let panel_lines = if let Some(pa) = panel_area {
-            let inner_w = (pa.width as usize).saturating_sub(1); // minus border │
-            if inner_w > 0 {
-                self.panel.build_lines(colors, vp_h, inner_w)
+        // Pre-build panel lines if visible (side panel or fallback)
+        // Reserve 1 col for scrollbar on the right edge of the panel
+        let panel_total_lines;
+        let panel_lines = if self.panel.visible {
+            if let Some(pa) = panel_area {
+                // side panel: │ + content + scrollbar
+                let inner_w = (pa.width as usize).saturating_sub(2);
+                if inner_w > 0 {
+                    let lines = self.panel.build_lines(colors, vp_h, inner_w);
+                    panel_total_lines = lines.len();
+                    lines
+                } else {
+                    panel_total_lines = 0;
+                    Vec::new()
+                }
+            } else if fallback_panel {
+                // Fallback: panel takes over the diff area; content + scrollbar
+                self.panel.width = diff_area.width;
+                let inner_w = diff_inner_w.saturating_sub(1);
+                let lines = self.panel.build_lines(colors, vp_h, inner_w);
+                panel_total_lines = lines.len();
+                lines
             } else {
+                panel_total_lines = 0;
                 Vec::new()
             }
         } else {
+            panel_total_lines = 0;
             Vec::new()
+        };
+
+        let (panel_thumb_start, panel_thumb_len) = if self.panel.visible && panel_total_lines > 0 {
+            self.panel.compute_scrollbar(vp_h, panel_total_lines)
+        } else {
+            (-1, 0)
         };
 
         // Render header
@@ -351,58 +516,90 @@ impl DiffViewer {
                 Rect::new(tree_area.x, tree_area.y + row as u16, tree_area.width, 1),
             );
 
-            // Diff
-            let diff_line = self.render_diff_row(row, diff_inner_w, colors);
-            let scroll_char = if thumb_start < 0 {
+            // Panel scrollbar character for this row
+            let panel_scroll_char = if panel_thumb_start < 0 {
                 Span::raw(" ")
-            } else if (row as i32) >= thumb_start && (row as i32) < thumb_start + thumb_len {
+            } else if (row as i32) >= panel_thumb_start && (row as i32) < panel_thumb_start + panel_thumb_len {
                 Span::styled("┃", Style::default().fg(colors.line_number_fg))
             } else {
                 Span::styled("│", Style::default().fg(colors.chrome_fg))
             };
-            let mut diff_spans = diff_line.spans;
-            diff_spans.push(scroll_char);
-            frame.render_widget(
-                Paragraph::new(Line::from(diff_spans)),
-                Rect::new(diff_area.x, diff_area.y + row as u16, diff_area.width, 1),
-            );
 
-            // Panel
-            if let Some(pa) = panel_area {
-                let border_color = if self.panel_focused {
-                    Color::Cyan
-                } else {
-                    colors.chrome_fg
-                };
-                let inner_w = (pa.width as usize).saturating_sub(1);
+            if fallback_panel {
+                // Fallback mode: render panel content in the diff area
+                let panel_inner_w = diff_inner_w.saturating_sub(1);
                 let panel_line_idx = self.panel.scroll_offset + row;
-
-                let mut spans = vec![
-                    Span::styled("│", Style::default().fg(border_color)),
-                ];
+                let mut spans: Vec<Span> = Vec::new();
                 if let Some(pl) = panel_lines.get(panel_line_idx) {
-                    let truncated = truncate_str(&pl.text, inner_w);
-                    let pad = inner_w.saturating_sub(UnicodeWidthStr::width(truncated.as_str()));
-                    let mut style = Style::default();
-                    if pl.color != Color::Reset {
-                        style = style.fg(pl.color);
-                    } else {
-                        style = style.fg(colors.context_fg);
+                    for s in &pl.line.spans {
+                        spans.push(s.clone());
                     }
-                    if pl.bold {
-                        style = style.add_modifier(Modifier::BOLD);
+                    let content_w: usize = pl.line.spans.iter()
+                        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                        .sum();
+                    let pad = panel_inner_w.saturating_sub(content_w);
+                    if pad > 0 {
+                        spans.push(Span::raw(" ".repeat(pad)));
                     }
-                    spans.push(Span::styled(
-                        format!("{truncated}{}", " ".repeat(pad)),
-                        style,
-                    ));
                 } else {
-                    spans.push(Span::raw(" ".repeat(inner_w)));
+                    spans.push(Span::raw(" ".repeat(panel_inner_w)));
                 }
+                spans.push(panel_scroll_char);
                 frame.render_widget(
                     Paragraph::new(Line::from(spans)),
-                    Rect::new(pa.x, pa.y + row as u16, pa.width, 1),
+                    Rect::new(diff_area.x, diff_area.y + row as u16, diff_area.width, 1),
                 );
+            } else {
+                // Normal mode: render diff content
+                let diff_line = self.render_diff_row(row, diff_inner_w, colors);
+                let scroll_char = if thumb_start < 0 {
+                    Span::raw(" ")
+                } else if (row as i32) >= thumb_start && (row as i32) < thumb_start + thumb_len {
+                    Span::styled("┃", Style::default().fg(colors.line_number_fg))
+                } else {
+                    Span::styled("│", Style::default().fg(colors.chrome_fg))
+                };
+                let mut diff_spans = diff_line.spans;
+                diff_spans.push(scroll_char);
+                frame.render_widget(
+                    Paragraph::new(Line::from(diff_spans)),
+                    Rect::new(diff_area.x, diff_area.y + row as u16, diff_area.width, 1),
+                );
+
+                // Side panel
+                if let Some(pa) = panel_area {
+                    let border_color = if self.panel_focused {
+                        Color::Cyan
+                    } else {
+                        colors.chrome_fg
+                    };
+                    // inner_w = total panel width - border(1) - scrollbar(1)
+                    let inner_w = (pa.width as usize).saturating_sub(2);
+                    let panel_line_idx = self.panel.scroll_offset + row;
+
+                    let mut spans: Vec<Span> = vec![
+                        Span::styled("│", Style::default().fg(border_color)),
+                    ];
+                    if let Some(pl) = panel_lines.get(panel_line_idx) {
+                        for s in &pl.line.spans {
+                            spans.push(s.clone());
+                        }
+                        let content_w: usize = pl.line.spans.iter()
+                            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                            .sum();
+                        let pad = inner_w.saturating_sub(content_w);
+                        if pad > 0 {
+                            spans.push(Span::raw(" ".repeat(pad)));
+                        }
+                    } else {
+                        spans.push(Span::raw(" ".repeat(inner_w)));
+                    }
+                    spans.push(panel_scroll_char.clone());
+                    frame.render_widget(
+                        Paragraph::new(Line::from(spans)),
+                        Rect::new(pa.x, pa.y + row as u16, pa.width, 1),
+                    );
+                }
             }
         }
 
@@ -851,6 +1048,11 @@ impl DiffViewer {
         let pad = width.saturating_sub(used);
         if pad > 0 {
             spans.push(Span::styled(" ".repeat(pad), bg_style));
+        }
+
+        // Overlay comment badge pill on the right edge
+        if let Some(badge) = &dl.badge {
+            overlay_badge(&mut spans, badge, bg, width, &self.dots_frame);
         }
 
         Line::from(spans)

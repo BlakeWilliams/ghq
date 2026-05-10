@@ -11,12 +11,23 @@ pub enum LineType {
 }
 
 #[derive(Debug, Clone)]
+pub struct CommentBadge {
+    pub thread_key: String,
+    pub side: String,
+    pub line: i32,
+    pub count: usize,
+    pub has_pending: bool,
+    pub resolved: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct DiffLineData {
     pub line_type: LineType,
     pub content: String,
     pub old_line_no: Option<i32>,
     pub new_line_no: Option<i32>,
     pub highlighted: Vec<(Style, String)>,
+    pub badge: Option<CommentBadge>,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +176,7 @@ impl RenderList {
             .position(|i| i.thread_key() == Some(key))
         {
             self.items[pos] = new_item;
+            self.rebuild_diff_map();
         }
     }
 
@@ -178,6 +190,17 @@ impl RenderList {
     pub fn clear(&mut self) {
         self.items.clear();
         self.diff_line_map.clear();
+    }
+
+    /// Find the badge (if any) on the diff line at the given render index.
+    pub fn badge_at(&self, index: usize) -> Option<&CommentBadge> {
+        self.items.get(index).and_then(|item| {
+            if let RenderItem::DiffLine(dl) = item {
+                dl.badge.as_ref()
+            } else {
+                None
+            }
+        })
     }
 
     fn rebuild_diff_map(&mut self) {
@@ -210,6 +233,108 @@ impl RenderList {
         };
         digits.max(3)
     }
+
+    /// Attach comment badges to diff lines based on comment positions.
+    /// Each badge is overlaid on the right edge of the matching diff line.
+    pub fn place_comments(
+        &mut self,
+        roots: &[CommentPosition],
+        pending: &[CommentPosition],
+    ) {
+        // Clear existing badges
+        for item in &mut self.items {
+            if let RenderItem::DiffLine(dl) = item {
+                dl.badge = None;
+            }
+        }
+        // Also remove any stale CommentThread items from prior versions
+        self.items.retain(|i| i.is_diff_line());
+
+        // Collect all positions, deduplicating by (side, line)
+        let mut badge_map: std::collections::HashMap<(String, i32), CommentBadge> =
+            std::collections::HashMap::new();
+
+        for root in roots {
+            let key = (root.side.clone(), root.line);
+            badge_map
+                .entry(key)
+                .and_modify(|b| {
+                    b.count = root.count;
+                })
+                .or_insert_with(|| CommentBadge {
+                    thread_key: root.comment_id.clone(),
+                    side: root.side.clone(),
+                    line: root.line,
+                    count: root.count,
+                    has_pending: false,
+                    resolved: false,
+                });
+        }
+
+        for p in pending {
+            let key = (p.side.clone(), p.line);
+            badge_map
+                .entry(key)
+                .and_modify(|b| {
+                    b.has_pending = true;
+                })
+                .or_insert_with(|| CommentBadge {
+                    thread_key: p.comment_id.clone(),
+                    side: p.side.clone(),
+                    line: p.line,
+                    count: p.count,
+                    has_pending: true,
+                    resolved: false,
+                });
+        }
+
+        // Attach badges to matching diff lines
+        for item in &mut self.items {
+            if let RenderItem::DiffLine(dl) = item {
+                match dl.line_type {
+                    LineType::Delete => {
+                        if let Some(ln) = dl.old_line_no {
+                            if let Some(badge) = badge_map.remove(&("LEFT".to_string(), ln)) {
+                                dl.badge = Some(badge);
+                            }
+                        }
+                    }
+                    LineType::Context => {
+                        // Context lines can have RIGHT or LEFT badges
+                        if let Some(ln) = dl.new_line_no {
+                            if let Some(badge) = badge_map.remove(&("RIGHT".to_string(), ln)) {
+                                dl.badge = Some(badge);
+                                continue;
+                            }
+                        }
+                        if let Some(ln) = dl.old_line_no {
+                            if let Some(badge) = badge_map.remove(&("LEFT".to_string(), ln)) {
+                                dl.badge = Some(badge);
+                            }
+                        }
+                    }
+                    LineType::Add => {
+                        if let Some(ln) = dl.new_line_no {
+                            if let Some(badge) = badge_map.remove(&("RIGHT".to_string(), ln)) {
+                                dl.badge = Some(badge);
+                            }
+                        }
+                    }
+                    LineType::HunkHeader => {}
+                }
+            }
+        }
+
+        self.rebuild_diff_map();
+    }
+}
+
+/// Describes a comment position for placement in the render list.
+pub struct CommentPosition {
+    pub comment_id: String,
+    pub side: String,
+    pub line: i32,
+    pub count: usize,
 }
 
 impl Default for RenderList {
@@ -229,6 +354,7 @@ mod tests {
             old_line_no: old,
             new_line_no: new,
             highlighted: Vec::new(),
+            badge: None,
         }
     }
 
@@ -398,5 +524,105 @@ mod tests {
         assert!(list.is_empty());
         assert_eq!(list.gutter_width(), 3);
         assert!(list.item_at_offset(0).is_none());
+    }
+
+    #[test]
+    fn place_comments_attaches_badges() {
+        let lines = vec![
+            make_line(LineType::Context, "a", Some(1), Some(1)),
+            make_line(LineType::Add, "b", None, Some(2)),
+            make_line(LineType::Delete, "c", Some(3), None),
+            make_line(LineType::Context, "d", Some(4), Some(3)),
+        ];
+        let mut list = RenderList::from_diff_lines(lines);
+        assert_eq!(list.len(), 4);
+
+        let roots = vec![
+            CommentPosition {
+                comment_id: "c1".to_string(),
+                side: "RIGHT".to_string(),
+                line: 2,
+                count: 2,
+            },
+            CommentPosition {
+                comment_id: "c2".to_string(),
+                side: "LEFT".to_string(),
+                line: 3,
+                count: 1,
+            },
+        ];
+        list.place_comments(&roots, &[]);
+
+        // Badges attached inline — no extra items
+        assert_eq!(list.len(), 4);
+
+        // Badge on line 2 RIGHT (add line at index 1)
+        let b1 = list.badge_at(1).expect("badge on add line");
+        assert_eq!(b1.thread_key, "c1");
+        assert_eq!(b1.count, 2);
+
+        // Badge on line 3 LEFT (delete line at index 2)
+        let b2 = list.badge_at(2).expect("badge on delete line");
+        assert_eq!(b2.thread_key, "c2");
+        assert_eq!(b2.count, 1);
+
+        // No badge on other lines
+        assert!(list.badge_at(0).is_none());
+        assert!(list.badge_at(3).is_none());
+    }
+
+    #[test]
+    fn place_comments_marks_pending() {
+        let lines = vec![
+            make_line(LineType::Add, "a", None, Some(5)),
+        ];
+        let mut list = RenderList::from_diff_lines(lines);
+
+        let roots = vec![CommentPosition {
+            comment_id: "c1".to_string(),
+            side: "RIGHT".to_string(),
+            line: 5,
+            count: 1,
+        }];
+        let pending = vec![CommentPosition {
+            comment_id: "c1".to_string(),
+            side: "RIGHT".to_string(),
+            line: 5,
+            count: 1,
+        }];
+        list.place_comments(&roots, &pending);
+
+        assert_eq!(list.len(), 1);
+        let badge = list.badge_at(0).expect("badge on add line");
+        assert!(badge.has_pending);
+    }
+
+    #[test]
+    fn place_comments_replaces_existing() {
+        let lines = vec![
+            make_line(LineType::Add, "a", None, Some(1)),
+        ];
+        let mut list = RenderList::from_diff_lines(lines);
+
+        let roots = vec![CommentPosition {
+            comment_id: "c1".to_string(),
+            side: "RIGHT".to_string(),
+            line: 1,
+            count: 1,
+        }];
+        list.place_comments(&roots, &[]);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list.badge_at(0).unwrap().count, 1);
+
+        // Place again with updated count — should replace, not duplicate
+        let roots2 = vec![CommentPosition {
+            comment_id: "c1".to_string(),
+            side: "RIGHT".to_string(),
+            line: 1,
+            count: 3,
+        }];
+        list.place_comments(&roots2, &[]);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list.badge_at(0).unwrap().count, 3);
     }
 }

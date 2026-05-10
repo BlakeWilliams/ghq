@@ -585,7 +585,8 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 
 	case reviewCommentsRefreshMsg:
 		m.branchData.reviewComments = msg.Comments
-		m.dv.Comments = commentStoreAdapter{store: m.commentStore, reviewComments: m.branchData.reviewComments}
+		m.commentStore.ImportGH(msg.Comments)
+		m.dv.Comments = commentStoreAdapter{store: m.commentStore}
 		// Re-format visible files to include new comments.
 		if m.dv.FilesHighlighted > 0 {
 			for i := 0; i < len(m.dv.Files); i++ {
@@ -1715,23 +1716,18 @@ func (m *Model) formatFile(index int) {
 	m.dv.FormatFile(index)
 }
 
-// commentStoreAdapter adapts a CommentStore + GitHub review comments to the CommentSource interface.
+// commentStoreAdapter adapts a CommentStore to the CommentSource interface.
+// GitHub review comments are imported into the store via ImportGH, so only
+// the store is needed here.
 type commentStoreAdapter struct {
-	store          *comments.CommentStore
-	reviewComments []github.ReviewComment
+	store *comments.CommentStore
 }
 
 func (a commentStoreAdapter) CommentsForFile(filename string) []github.ReviewComment {
-	var result []github.ReviewComment
-	if a.store != nil {
-		result = append(result, a.store.ForFile(filename)...)
+	if a.store == nil {
+		return nil
 	}
-	for _, c := range a.reviewComments {
-		if c.Path == filename {
-			result = append(result, c)
-		}
-	}
-	return result
+	return a.store.ForFile(filename)
 }
 
 // BlocksForFile implements diffviewer.BlockSource — returns content blocks

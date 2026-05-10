@@ -40,6 +40,8 @@ type DiffColors struct {
 	HighlightBorderFg string
 	// SelectedBorderFg is a raw ANSI fg code for selected comment borders (from palette fg).
 	SelectedBorderFg string
+	// CopilotBorderFg is a raw ANSI fg code for Copilot comment borders (from palette cyan).
+	CopilotBorderFg string
 
 	// ChromaStyle is a chroma style built from the terminal palette,
 	// suitable for syntax highlighting on both normal and tinted backgrounds.
@@ -103,6 +105,7 @@ func ComputeDiffColors(p terminal.Palette) DiffColors {
 		BorderColor:        borderColor,
 		HighlightBorderFg:  ColorToFgCode(orDefault(yellow, color.RGBA{R: 200, G: 180, B: 0, A: 255})),
 		SelectedBorderFg:   ColorToFgCode(orDefault(white, color.RGBA{R: 255, G: 255, B: 255, A: 255})),
+		CopilotBorderFg:    ColorToFgCode(orDefault(cyan, color.RGBA{R: 0, G: 180, B: 200, A: 255})),
 		PaletteGreen:   orDefault(green, color.RGBA{R: 0, G: 180, B: 0, A: 255}),
 		PaletteRed:     orDefault(red, color.RGBA{R: 220, G: 50, B: 50, A: 255}),
 		PaletteYellow:  orDefault(yellow, color.RGBA{R: 200, G: 180, B: 0, A: 255}),

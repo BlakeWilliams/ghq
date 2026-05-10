@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/blakewilliams/gg/internal/cache/persist"
@@ -57,10 +59,36 @@ func (c LocalComment) ToReviewComment() github.ReviewComment {
 }
 
 // IDToInt produces a deterministic int from a string ID.
+// For "gh-<n>" IDs (imported GitHub comments), it returns n directly so that
+// the int round-trips to the original GitHub API ID.
 func IDToInt(id string) int {
+	if n, ok := GHIDFromString(id); ok {
+		return n
+	}
 	h := sha256.Sum256([]byte(id))
 	// Use first 4 bytes as a positive int.
 	return int(h[0])<<24 | int(h[1])<<16 | int(h[2])<<8 | int(h[3])
+}
+
+// GHIDToString converts a GitHub int comment ID to the canonical "gh-<n>" string form.
+func GHIDToString(id int) string {
+	return fmt.Sprintf("gh-%d", id)
+}
+
+// GHIDFromString parses a "gh-<n>" string back to the original GitHub int ID.
+func GHIDFromString(id string) (int, bool) {
+	if strings.HasPrefix(id, "gh-") {
+		n, err := strconv.Atoi(id[3:])
+		if err == nil {
+			return n, true
+		}
+	}
+	return 0, false
+}
+
+// IsGHID returns true if the ID represents an imported GitHub comment.
+func IsGHID(id string) bool {
+	return strings.HasPrefix(id, "gh-")
 }
 
 // CommentStore manages local diff comments with persistence.
@@ -85,9 +113,67 @@ func LoadComments(repoPath string) *CommentStore {
 	return store
 }
 
-// Save persists the comment store to disk.
+// Save persists the comment store to disk, excluding imported GitHub comments
+// (which are ephemeral and refreshed from the API).
 func (s *CommentStore) Save() error {
-	return persist.Save(cacheFilename(s.RepoPath), s)
+	persistent := &CommentStore{RepoPath: s.RepoPath}
+	for _, c := range s.Comments {
+		if !IsGHID(c.ID) {
+			persistent.Comments = append(persistent.Comments, c)
+		}
+	}
+	return persist.Save(cacheFilename(s.RepoPath), persistent)
+}
+
+// ImportGH replaces the in-memory set of imported GitHub review comments.
+// Previous "gh-" entries are removed and the new set is added. The store is
+// NOT persisted — these comments come from the API and are refreshed periodically.
+func (s *CommentStore) ImportGH(ghComments []github.ReviewComment) {
+	// Keep only local (non-GH) comments.
+	kept := s.Comments[:0]
+	for _, c := range s.Comments {
+		if !IsGHID(c.ID) {
+			kept = append(kept, c)
+		}
+	}
+	s.Comments = kept
+
+	for _, gc := range ghComments {
+		s.Comments = append(s.Comments, ghReviewToLocal(gc))
+	}
+}
+
+// ghReviewToLocal converts a GitHub ReviewComment to a LocalComment with
+// a "gh-<id>" string ID so it participates in the normal CommentStore flow.
+func ghReviewToLocal(c github.ReviewComment) LocalComment {
+	lc := LocalComment{
+		ID:        GHIDToString(c.ID),
+		Body:      c.Body,
+		Path:      c.Path,
+		Side:      c.Side,
+		Author:    c.User.Login,
+		CreatedAt: c.CreatedAt,
+	}
+	if !c.UpdatedAt.IsZero() {
+		lc.CreatedAt = c.UpdatedAt
+	}
+	if c.Line != nil {
+		lc.Line = *c.Line
+	} else if c.OriginalLine != nil {
+		lc.Line = *c.OriginalLine
+	}
+	if c.StartLine != nil {
+		lc.StartLine = *c.StartLine
+	} else if c.OriginalStartLine != nil {
+		lc.StartLine = *c.OriginalStartLine
+	}
+	if c.InReplyToID != nil {
+		lc.InReplyToID = GHIDToString(*c.InReplyToID)
+	}
+	if lc.Side == "" {
+		lc.Side = "RIGHT"
+	}
+	return lc
 }
 
 // Add adds a comment and persists. If the comment has Blocks, they are

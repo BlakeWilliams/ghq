@@ -115,11 +115,15 @@ func (p *CommentPanel) View() string {
 
 	// Render each comment, recording line offsets.
 	p.CommentOffsets = make([]int, len(p.Comments))
+	copilotChrome := lipgloss.NewStyle().Foreground(p.Colors.PaletteCyan)
 	for i, c := range p.Comments {
 		p.CommentOffsets[i] = lineCount
 
-		// Comment header: " @author · 2h ago"
+		// Comment header: " @author · 2h ago" (with ✦ prefix for Copilot conversation)
 		author := ColoredAuthor(c.Author)
+		if c.IsCopilot {
+			author = copilotChrome.Render("✦") + " " + author
+		}
 		time := dim.Render(" · " + relativeTime(c.CreatedAt))
 		commentHeader := " " + author + time
 		writeLine(p.padLine(commentHeader, w))
@@ -145,10 +149,15 @@ func (p *CommentPanel) View() string {
 			}
 		}
 
-		// Separator between comments (not after the last)
+		// Separator between comments (not after the last).
+		// Use cyan separator when either adjacent comment is a Copilot conversation.
 		if i < len(p.Comments)-1 {
 			writeLine(p.emptyLine(w))
-			sepLine := " " + chrome.Render(strings.Repeat("─", contentW))
+			sepStyle := chrome
+			if c.IsCopilot || p.Comments[i+1].IsCopilot {
+				sepStyle = copilotChrome
+			}
+			sepLine := " " + sepStyle.Render(strings.Repeat("─", contentW))
 			writeLine(p.padLine(sepLine, w))
 			writeLine(p.emptyLine(w))
 		}

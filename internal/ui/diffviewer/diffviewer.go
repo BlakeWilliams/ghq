@@ -496,6 +496,7 @@ func (d *DiffViewer) RefreshPanel() {
 	}
 	if len(renderComments) == 0 {
 		renderComments = components.ReviewCommentsToRender(threadComments)
+		components.MarkCopilotConversation(renderComments)
 	}
 	// Merge pending copilot comments.
 	if pending := d.CopilotState.PendingRenderComments(d.PanelFile); len(pending) > 0 {
@@ -1497,13 +1498,16 @@ func (d *DiffViewer) SpliceThreadWithHighlight(fileIdx int, side string, line in
 					Author:    c.User.Login,
 					CreatedAt: c.CreatedAt,
 					Blocks:    blocks,
+					IsCopilot: c.User.Login == "copilot",
 				})
 			} else {
 				rendered = append(rendered, components.ReviewCommentToRender(c))
 			}
 		}
+		components.MarkCopilotConversation(rendered)
 	} else {
 		rendered = components.ReviewCommentsToRender(threadComments)
+		components.MarkCopilotConversation(rendered)
 	}
 
 	// Append any pending copilot comments for this thread.
@@ -1550,7 +1554,9 @@ func (d *DiffViewer) InsertThread(fileIdx int, diffLineIdx int, side string, lin
 		lt = d.FileDiffs[fileIdx][diffLineIdx].Type
 	}
 
-	item := components.NewCommentThreadItem(diffLineIdx, side, line, components.ReviewCommentsToRender(comments), lt)
+	rendered := components.ReviewCommentsToRender(comments)
+	components.MarkCopilotConversation(rendered)
+	item := components.NewCommentThreadItem(diffLineIdx, side, line, rendered, lt)
 	d.FileRenderers[fileIdx].InsertAfterDiffLine(diffLineIdx, item)
 
 	rc := d.renderContext(d.FileDiffs[fileIdx])

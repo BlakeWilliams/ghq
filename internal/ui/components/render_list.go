@@ -35,6 +35,7 @@ type RenderComment struct {
 	Author    string
 	CreatedAt time.Time
 	Blocks    []comments.ContentBlock
+	IsCopilot bool // true for comments from or directed at Copilot
 }
 
 // ReviewCommentToRender converts a GitHub API ReviewComment into a
@@ -45,6 +46,7 @@ func ReviewCommentToRender(c github.ReviewComment) RenderComment {
 		Author:    c.User.Login,
 		CreatedAt: c.CreatedAt,
 		Blocks:    []comments.ContentBlock{comments.TextBlock{Text: c.Body}},
+		IsCopilot: c.User.Login == "copilot",
 	}
 }
 
@@ -55,6 +57,21 @@ func ReviewCommentsToRender(cs []github.ReviewComment) []RenderComment {
 		out[i] = ReviewCommentToRender(c)
 	}
 	return out
+}
+
+// MarkCopilotConversation marks comments that are part of a Copilot conversation.
+// Comments authored by "copilot" are marked, as well as any comment that directly
+// precedes a copilot reply (the user's prompt that triggered the response).
+func MarkCopilotConversation(cs []RenderComment) {
+	for i := range cs {
+		if cs[i].Author == "copilot" {
+			cs[i].IsCopilot = true
+			// Mark the predecessor as "to copilot" (the user's prompt).
+			if i > 0 && cs[i-1].Author != "copilot" {
+				cs[i-1].IsCopilot = true
+			}
+		}
+	}
 }
 
 // Renderable is a single element in the rendered diff output.

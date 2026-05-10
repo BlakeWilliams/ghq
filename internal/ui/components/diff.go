@@ -289,6 +289,7 @@ func renderThread(ck commentKey, commentsByLine map[commentKey][]github.ReviewCo
 		rendered = opt.ThreadedComments[pk]
 	} else if threadComments, ok := commentsByLine[ck]; ok {
 		rendered = ReviewCommentsToRender(threadComments)
+		MarkCopilotConversation(rendered)
 	}
 	if pending := opt.PendingComments[pk]; len(pending) > 0 {
 		rendered = append(rendered, pending...)
@@ -328,11 +329,13 @@ func BuildThreadedRenderComments(comments []github.ReviewComment, blockLookup ma
 					Author:    c.User.Login,
 					CreatedAt: c.CreatedAt,
 					Blocks:    blocks,
+					IsCopilot: c.User.Login == "copilot",
 				}
 			} else {
 				rendered[i] = ReviewCommentToRender(c)
 			}
 		}
+		MarkCopilotConversation(rendered)
 		result[pk] = rendered
 	}
 	return result
@@ -1063,16 +1066,23 @@ func renderCommentThread(rcComments []RenderComment, width int, lt LineType, col
 		// topFg controls the ╭/├ header line, bodyFg controls │ body lines.
 		topFg := threadBorderFg
 		bodyFg := threadBorderFg
+
+		// Copilot conversation comments use cyan borders.
+		if c.IsCopilot {
+			topFg = colors.CopilotBorderFg
+			bodyFg = colors.CopilotBorderFg
+		}
+
 		if highlighted && hlIdx > 0 {
 			if i+1 == hlIdx {
-				// Selected comment: all borders bright.
 				topFg = hlBorderFg
 				bodyFg = hlBorderFg
 			} else if i+1 == hlIdx+1 && hlIdx < len(rcComments) {
-				// Comment right after selected: its top ├ serves as selected's bottom.
 				topFg = hlBorderFg
-				bodyFg = defaultBorderFg
-			} else {
+				if !c.IsCopilot {
+					bodyFg = defaultBorderFg
+				}
+			} else if !c.IsCopilot {
 				topFg = defaultBorderFg
 				bodyFg = defaultBorderFg
 			}

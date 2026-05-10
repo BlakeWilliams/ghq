@@ -1,3 +1,5 @@
+pub mod file_list;
+pub mod highlight_cache;
 pub mod panel;
 pub mod render_list;
 pub mod search;
@@ -9,8 +11,9 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
-use super::components::file_tree::{self, FileTreeEntry};
-use super::highlight::Highlighter;
+use self::file_list::FileList;
+use self::highlight_cache::HighlightManager;
+use super::scroll::{ScrollState, Scrollable};
 use super::styles::{self, DiffColors};
 use crate::git::diff::DiffMode;
 use crate::github::types::PullRequestFile;
@@ -29,24 +32,20 @@ pub struct LayoutInfo {
     pub additions: i32,
     pub deletions: i32,
     pub help_line: Vec<(String, String)>,
+    pub comment_counts: std::collections::HashMap<String, usize>,
 }
 
 pub struct DiffViewer {
-    pub viewport_offset: usize,
-    pub diff_cursor: usize,
+    pub scroll: ScrollState,
     pub render_list: RenderList,
     pub width: u16,
     pub height: u16,
     pub mode: DiffMode,
     pub search: search::SearchState,
     pub selection_start: Option<usize>,
-    pub tree_entries: Vec<FileTreeEntry>,
-    pub tree_cursor: usize,
-    pub tree_focused: bool,
+    pub file_list: FileList,
     pub panel_focused: bool,
-    pub files: Vec<PullRequestFile>,
-    pub current_file_idx: usize,
-    pub(crate) highlighter: Highlighter,
+    pub(crate) highlights: HighlightManager,
     pub panel: panel::CommentPanel,
     pub dots_frame: usize,
     pub waiting_g: bool,
@@ -57,13 +56,6 @@ fn spans_width(spans: &[Span]) -> usize {
         .iter()
         .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
         .sum()
-}
-
-fn expand_tabs_hl(spans: &[(Style, String)]) -> Vec<(Style, String)> {
-    spans
-        .iter()
-        .map(|(s, t)| (*s, t.replace('\t', "        ")))
-        .collect()
 }
 
 fn truncate_str(s: &str, max_width: usize) -> String {
@@ -179,21 +171,16 @@ fn truncate_spans(spans: &mut Vec<Span<'static>>, max_width: usize, bg: Color) {
 impl DiffViewer {
     pub fn new(mode: DiffMode) -> Self {
         Self {
-            viewport_offset: 0,
-            diff_cursor: 0,
+            scroll: ScrollState::new(),
             render_list: RenderList::new(),
             width: 0,
             height: 0,
             mode,
             search: search::SearchState::new(),
             selection_start: None,
-            tree_entries: Vec::new(),
-            tree_cursor: 0,
-            tree_focused: true,
+            file_list: FileList::new(),
             panel_focused: false,
-            files: Vec::new(),
-            current_file_idx: 0,
-            highlighter: Highlighter::new(),
+            highlights: HighlightManager::new(),
             panel: panel::CommentPanel::new(),
             dots_frame: 0,
             waiting_g: false,
@@ -204,181 +191,87 @@ impl DiffViewer {
         self.height.saturating_sub(CHROME_ROWS)
     }
 
+    pub fn is_selected(&self, idx: usize) -> bool {
+        if let Some(anchor) = self.selection_start {
+            let lo = anchor.min(self.scroll.cursor);
+            let hi = anchor.max(self.scroll.cursor);
+            idx >= lo && idx <= hi
+        } else {
+            false
+        }
+    }
+
     pub fn resize(&mut self, width: u16, height: u16) {
         self.width = width;
         self.height = height;
+        self.scroll.set_viewport_height(self.viewport_height() as usize);
     }
 
     pub fn total_lines(&self) -> usize {
         self.render_list.total_lines()
     }
+}
 
-    pub fn scroll_down(&mut self, n: usize) {
-        let max = self.total_lines().saturating_sub(1);
-        self.diff_cursor = (self.diff_cursor + n).min(max);
-        self.sync_viewport();
+impl Scrollable for DiffViewer {
+    fn scroll_state(&self) -> &ScrollState {
+        &self.scroll
     }
-
-    pub fn scroll_up(&mut self, n: usize) {
-        self.diff_cursor = self.diff_cursor.saturating_sub(n);
-        self.sync_viewport();
+    fn scroll_state_mut(&mut self) -> &mut ScrollState {
+        &mut self.scroll
     }
-
-    pub fn scroll_half_page_down(&mut self) {
-        let half = (self.viewport_height() / 2) as usize;
-        self.scroll_down(half.max(1));
+    fn sync_scroll_total(&mut self) {
+        self.scroll.set_total(self.total_lines());
     }
+}
 
-    pub fn scroll_half_page_up(&mut self) {
-        let half = (self.viewport_height() / 2) as usize;
-        self.scroll_up(half.max(1));
-    }
-
-    /// Scroll the viewport directly (mouse wheel). Cursor follows only to stay visible.
-    pub fn scroll_viewport(&mut self, delta: i32) {
-        let vp_h = self.viewport_height() as usize;
-        let total = self.total_lines();
-        if total <= vp_h {
-            return;
-        }
-        let max_offset = total.saturating_sub(vp_h);
-        if delta > 0 {
-            self.viewport_offset = (self.viewport_offset + delta as usize).min(max_offset);
-        } else {
-            self.viewport_offset = self.viewport_offset.saturating_sub((-delta) as usize);
-        }
-        // Clamp cursor to stay within viewport
-        if self.diff_cursor < self.viewport_offset {
-            self.diff_cursor = self.viewport_offset;
-        } else if self.diff_cursor >= self.viewport_offset + vp_h {
-            self.diff_cursor = self.viewport_offset + vp_h - 1;
-        }
-    }
-
-    pub fn goto_top(&mut self) {
-        self.diff_cursor = 0;
-        self.viewport_offset = 0;
-    }
-
-    pub fn goto_bottom(&mut self) {
-        self.diff_cursor = self.total_lines().saturating_sub(1);
-        self.sync_viewport();
-    }
-
-    fn sync_viewport(&mut self) {
-        let vp_height = self.viewport_height() as usize;
-        if vp_height == 0 {
-            return;
-        }
-        if self.diff_cursor < self.viewport_offset {
-            self.viewport_offset = self.diff_cursor;
-        } else if self.diff_cursor >= self.viewport_offset + vp_height {
-            self.viewport_offset = self.diff_cursor - vp_height + 1;
-        }
-    }
-
+impl DiffViewer {
     pub fn set_diff_lines(
         &mut self,
-        mut lines: Vec<DiffLineData>,
+        lines: Vec<DiffLineData>,
         filename: &str,
-        new_content: &str,
-        old_content: &str,
     ) {
-        let hl_new = if !new_content.is_empty() {
-            self.highlighter.highlight_file(new_content, filename)
-        } else {
-            Vec::new()
-        };
-        let hl_old = if !old_content.is_empty() {
-            self.highlighter.highlight_file(old_content, filename)
-        } else {
-            Vec::new()
-        };
-
-        for dl in &mut lines {
-            match dl.line_type {
-                LineType::Add | LineType::Context => {
-                    if let Some(ln) = dl.new_line_no {
-                        let idx = (ln - 1) as usize;
-                        if idx < hl_new.len() {
-                            dl.highlighted = expand_tabs_hl(&hl_new[idx]);
-                            continue;
-                        }
-                    }
-                    let expanded = dl.content.replace('\t', "        ");
-                    dl.highlighted = self.highlighter.highlight_line(&expanded, filename);
-                }
-                LineType::Delete => {
-                    if let Some(ln) = dl.old_line_no {
-                        let idx = (ln - 1) as usize;
-                        if idx < hl_old.len() {
-                            dl.highlighted = expand_tabs_hl(&hl_old[idx]);
-                            continue;
-                        }
-                    }
-                    let expanded = dl.content.replace('\t', "        ");
-                    dl.highlighted = self.highlighter.highlight_line(&expanded, filename);
-                }
-                LineType::HunkHeader => {}
-            }
-        }
-
         self.render_list = RenderList::from_diff_lines(lines);
         let total = self.total_lines();
-        if self.diff_cursor >= total && total > 0 {
-            self.diff_cursor = total - 1;
-        }
+        self.scroll.set_total(total);
+
+        // Apply cached highlights immediately if available
+        self.highlights.apply_cached(&mut self.render_list, filename);
+    }
+
+    pub fn apply_highlights(
+        &mut self,
+        hl_new: Vec<Vec<(Style, String)>>,
+        hl_old: Vec<Vec<(Style, String)>>,
+        filename: &str,
+    ) {
+        self.highlights.apply(&mut self.render_list, hl_new, hl_old, filename);
+    }
+
+    pub fn invalidate_highlight_cache(&mut self, filename: &str) {
+        self.highlights.invalidate(filename);
+    }
+
+    pub fn clear_highlight_cache(&mut self) {
+        self.highlights.clear();
     }
 
     pub fn set_files(&mut self, files: Vec<PullRequestFile>) {
-        self.tree_entries = file_tree::build_file_tree(&files);
-        self.files = files;
-        self.current_file_idx = 0;
-        self.diff_cursor = 0;
-        self.viewport_offset = 0;
-        // Set tree cursor to first non-directory entry
-        self.tree_cursor = self
-            .tree_entries
-            .iter()
-            .position(|e| !e.is_dir)
-            .unwrap_or(0);
+        let _ = self.file_list.set_files(files);
+        self.scroll.goto_top();
     }
 
-    /// Update the file list while preserving the current file, cursor, and
-    /// scroll position. Used by file-watcher reloads so the view doesn't jump.
     pub fn update_files(&mut self, files: Vec<PullRequestFile>) {
-        // Remember current file by name (survives reordering).
-        let prev_filename = self
-            .files
-            .get(self.current_file_idx)
-            .map(|f| f.filename.clone());
-        let saved_cursor = self.diff_cursor;
-        let saved_offset = self.viewport_offset;
-
-        self.tree_entries = file_tree::build_file_tree(&files);
-        self.files = files;
-
-        // Re-resolve file index by name.
-        if let Some(ref name) = prev_filename {
-            if let Some(idx) = self.files.iter().position(|f| &f.filename == name) {
-                self.current_file_idx = idx;
-            } else {
-                // File removed from diff — clamp to valid index.
-                self.current_file_idx = 0;
-                self.diff_cursor = 0;
-                self.viewport_offset = 0;
-                self.tree_cursor = self
-                    .tree_entries
-                    .iter()
-                    .position(|e| !e.is_dir)
-                    .unwrap_or(0);
-                return;
+        let saved_cursor = self.scroll.cursor;
+        let saved_offset = self.scroll.offset;
+        match self.file_list.update_files(files) {
+            file_list::UpdateResult::Preserved => {
+                self.scroll.cursor = saved_cursor;
+                self.scroll.offset = saved_offset;
+            }
+            file_list::UpdateResult::Reset => {
+                self.scroll.goto_top();
             }
         }
-
-        // Restore cursor/scroll — will be clamped after diff lines are set.
-        self.diff_cursor = saved_cursor;
-        self.viewport_offset = saved_offset;
     }
 
     fn gutter_width(&self) -> usize {
@@ -461,7 +354,14 @@ impl DiffViewer {
 
         // The diff area includes the scrollbar (1 col on the right)
         let diff_inner_w = (diff_area.width as usize).saturating_sub(1);
-        let (thumb_start, thumb_len) = self.compute_scrollbar(vp_h);
+        self.file_list.scroll.set_viewport_height(vp_h);
+        self.file_list.scroll.set_total(self.file_list.entries.len());
+        let (thumb_start, thumb_len) = {
+            self.scroll.set_total(self.total_lines());
+            self.scroll.set_viewport_height(vp_h);
+            self.scroll.clamp();
+            self.scroll.scrollbar()
+        };
 
         // Pre-build panel lines if visible (side panel or fallback)
         // Reserve 1 col for scrollbar on the right edge of the panel
@@ -471,7 +371,7 @@ impl DiffViewer {
                 // side panel: │ + content + scrollbar
                 let inner_w = (pa.width as usize).saturating_sub(2);
                 if inner_w > 0 {
-                    let lines = self.panel.build_lines(colors, vp_h, inner_w);
+                    let lines = self.panel.build_lines(colors, vp_h, inner_w, Some(&self.highlights.highlighter));
                     panel_total_lines = lines.len();
                     lines
                 } else {
@@ -482,7 +382,7 @@ impl DiffViewer {
                 // Fallback: panel takes over the diff area; content + scrollbar
                 self.panel.width = diff_area.width;
                 let inner_w = diff_inner_w.saturating_sub(1);
-                let lines = self.panel.build_lines(colors, vp_h, inner_w);
+                let lines = self.panel.build_lines(colors, vp_h, inner_w, Some(&self.highlights.highlighter));
                 panel_total_lines = lines.len();
                 lines
             } else {
@@ -495,7 +395,10 @@ impl DiffViewer {
         };
 
         let (panel_thumb_start, panel_thumb_len) = if self.panel.visible && panel_total_lines > 0 {
-            self.panel.compute_scrollbar(vp_h, panel_total_lines)
+            self.panel.scroll.set_viewport_height(vp_h);
+            self.panel.scroll.set_total(panel_total_lines);
+            self.panel.scroll.clamp();
+            self.panel.scroll.scrollbar()
         } else {
             (-1, 0)
         };
@@ -510,7 +413,7 @@ impl DiffViewer {
         // Render content rows
         for row in 0..vp_h {
             // Tree
-            let tree_line = self.render_tree_row(row, vp_h, tree_area.width as usize, colors);
+            let tree_line = self.file_list.render_row(row, vp_h, tree_area.width as usize, colors, &info.comment_counts);
             frame.render_widget(
                 Paragraph::new(tree_line),
                 Rect::new(tree_area.x, tree_area.y + row as u16, tree_area.width, 1),
@@ -528,7 +431,7 @@ impl DiffViewer {
             if fallback_panel {
                 // Fallback mode: render panel content in the diff area
                 let panel_inner_w = diff_inner_w.saturating_sub(1);
-                let panel_line_idx = self.panel.scroll_offset + row;
+                let panel_line_idx = self.panel.scroll.offset + row;
                 let mut spans: Vec<Span> = Vec::new();
                 if let Some(pl) = panel_lines.get(panel_line_idx) {
                     for s in &pl.line.spans {
@@ -550,8 +453,29 @@ impl DiffViewer {
                     Rect::new(diff_area.x, diff_area.y + row as u16, diff_area.width, 1),
                 );
             } else {
-                // Normal mode: render diff content
-                let diff_line = self.render_diff_row(row, diff_inner_w, colors);
+                // Normal mode: render diff content or empty state
+                let diff_line = if self.file_list.files.is_empty() && self.render_list.len() == 0 {
+                    let mid = vp_h / 2;
+                    if row == mid {
+                        let msg = if self.file_list.loaded {
+                            "No changes"
+                        } else {
+                            "Loading…"
+                        };
+                        let msg_w = UnicodeWidthStr::width(msg);
+                        let left_pad = diff_inner_w.saturating_sub(msg_w) / 2;
+                        let right_pad = diff_inner_w.saturating_sub(left_pad + msg_w);
+                        Line::from(vec![
+                            Span::raw(" ".repeat(left_pad)),
+                            Span::styled(msg, Style::default().fg(Color::DarkGray)),
+                            Span::raw(" ".repeat(right_pad)),
+                        ])
+                    } else {
+                        Line::from(Span::raw(" ".repeat(diff_inner_w)))
+                    }
+                } else {
+                    self.render_diff_row(row, diff_inner_w, colors)
+                };
                 let scroll_char = if thumb_start < 0 {
                     Span::raw(" ")
                 } else if (row as i32) >= thumb_start && (row as i32) < thumb_start + thumb_len {
@@ -575,7 +499,7 @@ impl DiffViewer {
                     };
                     // inner_w = total panel width - border(1) - scrollbar(1)
                     let inner_w = (pa.width as usize).saturating_sub(2);
-                    let panel_line_idx = self.panel.scroll_offset + row;
+                    let panel_line_idx = self.panel.scroll.offset + row;
 
                     let mut spans: Vec<Span> = vec![
                         Span::styled("│", Style::default().fg(border_color)),
@@ -620,8 +544,8 @@ impl DiffViewer {
         let bright = Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD);
-        let tree_title_style = if self.tree_focused { bright } else { dim };
-        let diff_title_style = if !self.tree_focused { bright } else { dim };
+        let tree_title_style = if self.file_list.focused { bright } else { dim };
+        let diff_title_style = if !self.file_list.focused { bright } else { dim };
 
         let file_label = match info.file_count {
             0 => "Files".to_string(),
@@ -780,113 +704,13 @@ impl DiffViewer {
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
-    fn render_tree_row(
-        &self,
-        row: usize,
-        tree_h: usize,
-        tree_w: usize,
-        colors: &DiffColors,
-    ) -> Line<'static> {
-        let inner_w = tree_w.saturating_sub(1);
-        let sep = Span::styled("│", Style::default().fg(colors.chrome_fg));
-
-        let total = self.tree_entries.len();
-        if total == 0 {
-            return Line::from(vec![Span::raw(" ".repeat(inner_w)), sep]);
-        }
-
-        let mut start = self.tree_cursor as isize - tree_h as isize / 2;
-        if start < 0 {
-            start = 0;
-        }
-        if (start as usize) + tree_h > total {
-            start = (total as isize - tree_h as isize).max(0);
-        }
-        let idx = start as usize + row;
-
-        if idx >= total {
-            return Line::from(vec![Span::raw(" ".repeat(inner_w)), sep]);
-        }
-
-        let entry = &self.tree_entries[idx];
-        let is_cursor = idx == self.tree_cursor;
-        let is_current = !entry.is_dir && entry.file_index as usize == self.current_file_idx;
-
-        let depth_pad = "  ".repeat(entry.depth);
-        let mut spans: Vec<Span> = Vec::new();
-
-        if entry.is_dir {
-            let text = format!("  {depth_pad}{}", entry.display);
-            spans.push(Span::styled(
-                text,
-                Style::default()
-                    .fg(Color::Blue)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        } else {
-            let name = &entry.display;
-            let prefix = if is_cursor { "▸ " } else { "  " };
-            let name_style = if is_cursor || is_current {
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            spans.push(Span::styled(
-                format!("{depth_pad}{prefix}{name}"),
-                name_style,
-            ));
-
-            if let Some(f) = self.files.get(entry.file_index as usize) {
-                match f.status.as_str() {
-                    "added" => {
-                        spans.push(Span::styled(
-                            " +",
-                            Style::default().fg(Color::Green),
-                        ));
-                    }
-                    "removed" => {
-                        spans.push(Span::styled(
-                            " -",
-                            Style::default().fg(Color::Red),
-                        ));
-                    }
-                    _ => {
-                        if f.additions > 0 {
-                            spans.push(Span::styled(
-                                " +",
-                                Style::default().fg(Color::Green),
-                            ));
-                        }
-                        if f.deletions > 0 {
-                            spans.push(Span::styled(
-                                "-",
-                                Style::default().fg(Color::Red),
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-
-        let text_w = spans_width(&spans);
-        let pad = inner_w.saturating_sub(text_w);
-        if pad > 0 {
-            spans.push(Span::raw(" ".repeat(pad)));
-        }
-        spans.push(sep);
-
-        Line::from(spans)
-    }
-
     fn render_diff_row(
         &self,
         row: usize,
         width: usize,
         colors: &DiffColors,
     ) -> Line<'static> {
-        let idx = self.viewport_offset + row;
+        let idx = self.scroll.offset + row;
         let item = match self.render_list.get(idx) {
             Some(item) => item,
             None => return Line::from(Span::raw(" ".repeat(width))),
@@ -907,7 +731,7 @@ impl DiffViewer {
         width: usize,
         colors: &DiffColors,
     ) -> Line<'static> {
-        let is_cursor = idx == self.diff_cursor;
+        let is_cursor = idx == self.scroll.cursor;
         let bg = if is_cursor {
             colors.cursor_bg
         } else {
@@ -943,7 +767,7 @@ impl DiffViewer {
         width: usize,
         colors: &DiffColors,
     ) -> Line<'static> {
-        let is_cursor = idx == self.diff_cursor;
+        let is_cursor = idx == self.scroll.cursor;
         let is_selected = self.is_selected(idx);
         let col_w = self.gutter_width();
 
@@ -993,11 +817,16 @@ impl DiffViewer {
                 spans.push(Span::styled(new_gutter, gutter_style));
                 spans.push(Span::styled(" ", gutter_style));
                 spans.push(Span::styled("+", marker_style));
-                for (hl_style, text) in &dl.highlighted {
-                    spans.push(Span::styled(
-                        text.clone(),
-                        hl_style.bg(bg),
-                    ));
+                if dl.highlighted.is_empty() {
+                    let expanded = dl.content.replace('\t', "        ");
+                    spans.push(Span::styled(expanded, bg_style));
+                } else {
+                    for (hl_style, text) in &dl.highlighted {
+                        spans.push(Span::styled(
+                            text.clone(),
+                            hl_style.bg(bg),
+                        ));
+                    }
                 }
             }
             LineType::Delete => {
@@ -1013,11 +842,16 @@ impl DiffViewer {
                 spans.push(Span::styled(new_gutter, gutter_style));
                 spans.push(Span::styled(" ", gutter_style));
                 spans.push(Span::styled("-", marker_style));
-                for (hl_style, text) in &dl.highlighted {
-                    spans.push(Span::styled(
-                        text.clone(),
-                        hl_style.bg(bg),
-                    ));
+                if dl.highlighted.is_empty() {
+                    let expanded = dl.content.replace('\t', "        ");
+                    spans.push(Span::styled(expanded, bg_style));
+                } else {
+                    for (hl_style, text) in &dl.highlighted {
+                        spans.push(Span::styled(
+                            text.clone(),
+                            hl_style.bg(bg),
+                        ));
+                    }
                 }
             }
             LineType::Context => {
@@ -1034,11 +868,16 @@ impl DiffViewer {
                 spans.push(Span::styled(" ", gutter_style));
                 spans.push(Span::styled(new_gutter, gutter_style));
                 spans.push(Span::styled("  ", gutter_style));
-                for (hl_style, text) in &dl.highlighted {
-                    spans.push(Span::styled(
-                        text.clone(),
-                        hl_style.bg(bg),
-                    ));
+                if dl.highlighted.is_empty() {
+                    let expanded = dl.content.replace('\t', "        ");
+                    spans.push(Span::styled(expanded, bg_style));
+                } else {
+                    for (hl_style, text) in &dl.highlighted {
+                        spans.push(Span::styled(
+                            text.clone(),
+                            hl_style.bg(bg),
+                        ));
+                    }
                 }
             }
         }
@@ -1058,32 +897,105 @@ impl DiffViewer {
         Line::from(spans)
     }
 
-    fn compute_scrollbar(&self, vp_h: usize) -> (i32, i32) {
-        let total = self.total_lines();
-        if total <= vp_h || total == 0 {
-            return (-1, 0);
+
+    /// Build highlighted diff context lines for the comment panel.
+    /// Renders the lines around the current cursor position (or selection range).
+    pub fn panel_diff_context(&self, colors: &DiffColors) -> Vec<Line<'static>> {
+        let total = self.render_list.len();
+        if total == 0 {
+            return Vec::new();
         }
-        let mut thumb_len = (vp_h * vp_h / total) as i32;
-        if thumb_len < 1 {
-            thumb_len = 1;
+
+        let (start_idx, end_idx) = if let Some(sel) = self.selection_start {
+            let lo = sel.min(self.scroll.cursor);
+            let hi = sel.max(self.scroll.cursor);
+            (lo, hi)
+        } else {
+            (self.scroll.cursor, self.scroll.cursor)
+        };
+
+        let mut lines = Vec::new();
+        let width = self.panel.width.saturating_sub(2) as usize; // inner panel width
+
+        for idx in start_idx..=end_idx.min(total - 1) {
+            if let Some(RenderItem::DiffLine(dl)) = self.render_list.get(idx) {
+                lines.push(self.render_context_line(dl, width, colors));
+            }
         }
-        let scrollable = total - vp_h;
-        let offset = self.viewport_offset.min(scrollable);
-        let thumb_start =
-            (offset * (vp_h as usize - thumb_len as usize) / scrollable) as i32;
-        (thumb_start, thumb_len)
+        lines
     }
 
-    fn is_selected(&self, idx: usize) -> bool {
-        if let Some(start) = self.selection_start {
-            let (lo, hi) = if start <= self.diff_cursor {
-                (start, self.diff_cursor)
-            } else {
-                (self.diff_cursor, start)
-            };
-            idx >= lo && idx <= hi
-        } else {
-            false
+    /// Render a single diff line for panel context (no cursor/selection highlight).
+    fn render_context_line(&self, dl: &DiffLineData, width: usize, colors: &DiffColors) -> Line<'static> {
+        let col_w = self.gutter_width();
+        let bg = match dl.line_type {
+            LineType::Add => colors.add_bg,
+            LineType::Delete => colors.del_bg,
+            LineType::HunkHeader => colors.hunk_bg,
+            LineType::Context => Color::Reset,
+        };
+
+        let mut spans: Vec<Span> = Vec::new();
+
+        match dl.line_type {
+            LineType::HunkHeader => {
+                let expanded = dl.content.replace('\t', "        ");
+                spans.push(Span::styled(expanded, Style::default().fg(colors.hunk_fg).bg(bg)));
+            }
+            LineType::Add => {
+                let gutter_style = Style::default().fg(colors.add_fg).bg(bg);
+                let marker_style = gutter_style.add_modifier(Modifier::BOLD);
+                let new_gutter = dl.new_line_no
+                    .map(|n| format!("{n:>col_w$}"))
+                    .unwrap_or_else(|| " ".repeat(col_w));
+                spans.push(Span::styled(" ".repeat(col_w), gutter_style));
+                spans.push(Span::styled(" ", gutter_style));
+                spans.push(Span::styled(new_gutter, gutter_style));
+                spans.push(Span::styled(" ", gutter_style));
+                spans.push(Span::styled("+", marker_style));
+                for (hl_style, text) in &dl.highlighted {
+                    spans.push(Span::styled(text.clone(), hl_style.bg(bg)));
+                }
+            }
+            LineType::Delete => {
+                let gutter_style = Style::default().fg(colors.del_fg).bg(bg);
+                let marker_style = gutter_style.add_modifier(Modifier::BOLD);
+                let old_gutter = dl.old_line_no
+                    .map(|n| format!("{n:>col_w$}"))
+                    .unwrap_or_else(|| " ".repeat(col_w));
+                spans.push(Span::styled(old_gutter, gutter_style));
+                spans.push(Span::styled(" ", gutter_style));
+                spans.push(Span::styled(" ".repeat(col_w), gutter_style));
+                spans.push(Span::styled(" ", gutter_style));
+                spans.push(Span::styled("-", marker_style));
+                for (hl_style, text) in &dl.highlighted {
+                    spans.push(Span::styled(text.clone(), hl_style.bg(bg)));
+                }
+            }
+            LineType::Context => {
+                let gutter_style = Style::default().fg(colors.line_number_fg).bg(bg);
+                let old_gutter = dl.old_line_no
+                    .map(|n| format!("{n:>col_w$}"))
+                    .unwrap_or_else(|| " ".repeat(col_w));
+                let new_gutter = dl.new_line_no
+                    .map(|n| format!("{n:>col_w$}"))
+                    .unwrap_or_else(|| " ".repeat(col_w));
+                spans.push(Span::styled(old_gutter, gutter_style));
+                spans.push(Span::styled(" ", gutter_style));
+                spans.push(Span::styled(new_gutter, gutter_style));
+                spans.push(Span::styled("  ", gutter_style));
+                for (hl_style, text) in &dl.highlighted {
+                    spans.push(Span::styled(text.clone(), hl_style.bg(bg)));
+                }
+            }
         }
+
+        // Pad/truncate to width
+        let used: usize = spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
+        if used < width {
+            spans.push(Span::styled(" ".repeat(width - used), Style::default().bg(bg)));
+        }
+
+        Line::from(spans)
     }
 }

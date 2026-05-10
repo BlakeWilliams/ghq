@@ -9,6 +9,7 @@ pub mod highlight;
 pub mod local_diff;
 pub mod markdown;
 pub mod picker;
+pub mod scroll;
 pub mod styles;
 
 pub use app::App;

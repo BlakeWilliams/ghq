@@ -114,6 +114,10 @@ impl RenderList {
         &self.items
     }
 
+    pub fn items_mut(&mut self) -> &mut [RenderItem] {
+        &mut self.items
+    }
+
     pub fn len(&self) -> usize {
         self.items.len()
     }

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use ratatui::style::{Color, Modifier, Style};
 use syntect::easy::HighlightLines;
@@ -24,12 +25,11 @@ fn rust_extra_keywords() -> HashSet<&'static str> {
     .collect()
 }
 
+#[derive(Clone)]
 pub struct Highlighter {
-    syntax_set: SyntaxSet,
+    syntax_set: Arc<SyntaxSet>,
     theme: Theme,
     /// When set, maps syntect RGB output → ANSI color names.
-    /// Used when no palette is available, so the terminal renders colors
-    /// from its own palette rather than using hardcoded RGB values.
     ansi_map: Option<HashMap<(u8, u8, u8), Color>>,
 }
 
@@ -271,7 +271,7 @@ impl Highlighter {
     pub fn new() -> Self {
         let ss = two_face::syntax::extra_newlines();
         Self {
-            syntax_set: ss,
+            syntax_set: Arc::new(ss),
             theme: default_ansi_theme(),
             ansi_map: Some(build_ansi_map()),
         }
@@ -411,6 +411,41 @@ impl Highlighter {
             }
             Err(_) => vec![(Style::default(), line.to_string())],
         }
+    }
+
+    /// Highlight a code block by language token (e.g. "rust", "go", "js").
+    /// Returns one Vec<(Style, String)> per line.
+    pub fn highlight_code_block(&self, code: &str, lang: &str) -> Vec<Vec<(Style, String)>> {
+        let syntax = self
+            .syntax_set
+            .find_syntax_by_token(lang)
+            .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text());
+
+        let is_rust = syntax.name == "Rust" || syntax.name == "Rust Enhanced";
+        let mut h = HighlightLines::new(syntax, &self.theme);
+        let mut result = Vec::new();
+
+        for line in LinesWithEndings::from(code) {
+            match h.highlight_line(line, &self.syntax_set) {
+                Ok(regions) => {
+                    let spans: Vec<(Style, String)> = regions
+                        .into_iter()
+                        .map(|(style, text)| {
+                            let s = self.to_style(style);
+                            let clean = text.trim_end_matches('\n').trim_end_matches('\r');
+                            (s, clean.to_string())
+                        })
+                        .filter(|(_, t)| !t.is_empty())
+                        .collect();
+                    result.push(self.patch_rust_keywords(spans, is_rust));
+                }
+                Err(_) => {
+                    result.push(vec![(Style::default(), line.trim_end().to_string())]);
+                }
+            }
+        }
+
+        result
     }
 }
 

@@ -1,8 +1,10 @@
+use super::scroll::ScrollState;
+
 pub struct Chat {
     pub visible: bool,
     pub messages: Vec<ChatMessage>,
     pub input: String,
-    pub scroll_offset: usize,
+    pub scroll: ScrollState,
     pub streaming: bool,
 }
 
@@ -25,7 +27,7 @@ impl Chat {
                 body: "Hi! I'm Copilot. Ask me anything about your code.".to_string(),
             }],
             input: String::new(),
-            scroll_offset: 0,
+            scroll: ScrollState::new(),
             streaming: false,
         }
     }
@@ -66,11 +68,11 @@ impl Chat {
     }
 
     pub fn scroll_down(&mut self, n: usize) {
-        self.scroll_offset += n;
+        self.scroll.scroll_down(n);
     }
 
     pub fn scroll_up(&mut self, n: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(n);
+        self.scroll.scroll_up(n);
     }
 }
 

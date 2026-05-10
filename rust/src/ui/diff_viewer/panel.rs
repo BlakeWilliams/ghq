@@ -4,7 +4,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::super::styles::DiffColors;
+use crate::ui::scroll::{ScrollState, Scrollable};
+use crate::ui::styles::DiffColors;
 use crate::ui::copilot_state::{ContentBlock, ToolGroup, ToolStatus};
 
 // Our ANSI-palette-derived stylesheet for tui-markdown.
@@ -134,7 +135,8 @@ fn wrap_styled_line(line: ratatui::text::Line<'static>, max_width: usize) -> Vec
 
 /// Render a markdown string into panel lines. Each returned line has inline
 /// styling from tui-markdown, wrapped to fit within max_width.
-fn render_markdown(body: &str, max_width: usize) -> Vec<Line<'static>> {
+/// If a Highlighter is provided, fenced code blocks are syntax-highlighted.
+fn render_markdown(body: &str, max_width: usize, highlighter: Option<&crate::ui::highlight::Highlighter>) -> Vec<Line<'static>> {
     let owned_body = body.to_string();
     let text = tui_markdown::from_str_with_options(&owned_body, &md_options());
 
@@ -166,6 +168,88 @@ fn render_markdown(body: &str, max_width: usize) -> Vec<Line<'static>> {
             merged.push(std::mem::take(&mut raw_lines[i]));
             i += 1;
         }
+    }
+
+    // Syntax-highlight fenced code blocks using our Highlighter.
+    // tui-markdown emits ```lang and ``` as literal span content.
+    if let Some(hl) = highlighter {
+        let mut highlighted: Vec<Line<'static>> = Vec::with_capacity(merged.len());
+        let mut in_code = false;
+        let mut code_lang = String::new();
+        let mut code_buf = String::new();
+        let mut fence_line: Option<Line<'static>> = None;
+
+        for line in merged {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let trimmed = text.trim();
+
+            if !in_code && trimmed.starts_with("```") {
+                in_code = true;
+                code_lang = trimmed.trim_start_matches('`').to_string();
+                code_buf.clear();
+                fence_line = Some(line);
+            } else if in_code && trimmed == "```" {
+                // Highlight collected code block
+                if !code_lang.is_empty() && code_lang != "text" && code_lang != "plain" {
+                    let hl_lines = hl.highlight_code_block(&code_buf, &code_lang);
+                    // Emit opening fence
+                    if let Some(fl) = fence_line.take() {
+                        highlighted.push(fl);
+                    }
+                    for spans in hl_lines {
+                        let rspans: Vec<Span<'static>> = spans
+                            .into_iter()
+                            .map(|(style, text)| Span::styled(text, style))
+                            .collect();
+                        highlighted.push(Line::from(rspans));
+                    }
+                } else {
+                    // No language — emit as-is with code style
+                    if let Some(fl) = fence_line.take() {
+                        highlighted.push(fl);
+                    }
+                    for code_line in code_buf.lines() {
+                        highlighted.push(Line::from(Span::styled(
+                            code_line.to_string(),
+                            Style::default().fg(Color::Yellow),
+                        )));
+                    }
+                }
+                highlighted.push(line); // closing fence
+                in_code = false;
+            } else if in_code {
+                code_buf.push_str(&text);
+                code_buf.push('\n');
+            } else {
+                highlighted.push(line);
+            }
+        }
+
+        // If we ended mid-fence (streaming), highlight what we have so far
+        if in_code {
+            if let Some(fl) = fence_line.take() {
+                highlighted.push(fl);
+            }
+            if !code_lang.is_empty() && code_lang != "text" && code_lang != "plain" {
+                let hl_lines = hl.highlight_code_block(&code_buf, &code_lang);
+                for spans in hl_lines {
+                    let rspans: Vec<Span<'static>> = spans
+                        .into_iter()
+                        .map(|(style, text)| Span::styled(text, style))
+                        .collect();
+                    highlighted.push(Line::from(rspans));
+                }
+            } else {
+                for code_line in code_buf.lines() {
+                    highlighted.push(Line::from(Span::styled(
+                        code_line.to_string(),
+                        Style::default().fg(Color::Yellow),
+                    )));
+                }
+            }
+        }
+
+        merged = highlighted;
     }
 
     let mut result = Vec::new();
@@ -362,27 +446,37 @@ pub enum ReplyMode {
 
 pub struct CommentPanel {
     pub visible: bool,
-    pub scroll_offset: usize,
+    pub scroll: ScrollState,
     pub width: u16,
     pub thread_key: Option<String>,
     pub comments: Vec<PanelComment>,
     pub reply_view: Option<String>,
     pub reply_mode: ReplyMode,
     pub file_path: String,
-    pub diff_context: Vec<String>,
+    pub diff_context: Vec<Line<'static>>,
     pub resolved: bool,
     pub panel_line: i32,
+    md_cache: std::collections::HashMap<(String, usize), Vec<Line<'static>>>,
 }
 
 const MIN_PANEL_WIDTH: u16 = 55;
 const MAX_PANEL_WIDTH: u16 = 100;
 const DIFF_MIN_WIDTH: u16 = 90;
 
+impl Scrollable for CommentPanel {
+    fn scroll_state(&self) -> &ScrollState {
+        &self.scroll
+    }
+    fn scroll_state_mut(&mut self) -> &mut ScrollState {
+        &mut self.scroll
+    }
+}
+
 impl CommentPanel {
     pub fn new() -> Self {
         Self {
             visible: false,
-            scroll_offset: 0,
+            scroll: ScrollState::new(),
             width: MIN_PANEL_WIDTH,
             thread_key: None,
             comments: Vec::new(),
@@ -392,17 +486,20 @@ impl CommentPanel {
             diff_context: Vec::new(),
             resolved: false,
             panel_line: 0,
+            md_cache: std::collections::HashMap::new(),
         }
     }
 
-    pub fn open_thread(&mut self, thread_key: String, comments: Vec<PanelComment>, file_path: String) {
+    pub fn open_thread(&mut self, thread_key: String, comments: Vec<PanelComment>, file_path: String, diff_context: Vec<Line<'static>>) {
         let changed_thread = self.thread_key.as_deref() != Some(&thread_key);
         self.visible = true;
         self.thread_key = Some(thread_key);
         self.comments = comments;
         self.file_path = file_path;
+        self.diff_context = diff_context;
         if changed_thread {
-            self.scroll_offset = 0;
+            self.scroll.scroll_to_bottom();
+            self.md_cache.clear();
         }
     }
 
@@ -426,8 +523,12 @@ impl CommentPanel {
     }
 
     pub fn set_reply_view(&mut self, text: String, mode: ReplyMode) {
+        let was_none = self.reply_view.is_none();
         self.reply_view = Some(text);
         self.reply_mode = mode;
+        if was_none {
+            self.scroll.pending_bottom = true;
+        }
     }
 
     pub fn clear_reply_view(&mut self) {
@@ -443,34 +544,11 @@ impl CommentPanel {
         self.diff_context.clear();
         self.resolved = false;
         self.panel_line = 0;
-        self.scroll_offset = 0;
+        self.scroll = ScrollState::new();
+        self.md_cache.clear();
     }
 
-    pub fn scroll_down(&mut self, n: usize) {
-        let max = self.content_line_count().saturating_sub(1);
-        self.scroll_offset = (self.scroll_offset + n).min(max);
-    }
-
-    pub fn scroll_up(&mut self, n: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(n);
-    }
-
-    pub fn compute_scrollbar(&self, vp_h: usize, total: usize) -> (i32, i32) {
-        if total <= vp_h || total == 0 {
-            return (-1, 0);
-        }
-        let mut thumb_len = (vp_h * vp_h / total) as i32;
-        if thumb_len < 1 {
-            thumb_len = 1;
-        }
-        let scrollable = total - vp_h;
-        let offset = self.scroll_offset.min(scrollable);
-        let thumb_start =
-            (offset * (vp_h - thumb_len as usize) / scrollable) as i32;
-        (thumb_start, thumb_len)
-    }
-
-    pub fn build_lines(&self, colors: &DiffColors, viewport_height: usize, inner_width: usize) -> Vec<PanelLine> {
+    pub fn build_lines(&mut self, colors: &DiffColors, viewport_height: usize, inner_width: usize, highlighter: Option<&crate::ui::highlight::Highlighter>) -> Vec<PanelLine> {
         let mut lines = Vec::new();
         let w = inner_width;
         let body_wrap_w = w.saturating_sub(1);
@@ -483,10 +561,10 @@ impl CommentPanel {
             }
         }
 
-        // Diff context preview
+        // Diff context preview (highlighted)
         if !self.diff_context.is_empty() {
             for ctx_line in &self.diff_context {
-                lines.push(PanelLine::text(&format!(" {ctx_line}")));
+                lines.push(PanelLine::rich(ctx_line.clone()));
             }
             lines.push(PanelLine::styled(
                 &"─".repeat(w),
@@ -546,7 +624,16 @@ impl CommentPanel {
                         match block {
                             ContentBlock::Text(text) => {
                                 if !text.is_empty() {
-                                    let md_lines = render_markdown(text, body_wrap_w);
+                                    let cache_key = (text.clone(), body_wrap_w);
+                                    let md_lines = if comment.is_pending {
+                                        render_markdown(text, body_wrap_w, highlighter)
+                                    } else if let Some(cached) = self.md_cache.get(&cache_key) {
+                                        cached.clone()
+                                    } else {
+                                        let rendered = render_markdown(text, body_wrap_w, highlighter);
+                                        self.md_cache.insert(cache_key, rendered.clone());
+                                        rendered
+                                    };
                                     for ml in md_lines {
                                         lines.push(PanelLine::rich(ml));
                                     }
@@ -728,7 +815,7 @@ impl CommentPanel {
                         match block {
                             ContentBlock::Text(text) => {
                                 if !text.is_empty() {
-                                    count += render_markdown(text, body_wrap_w).len();
+                                    count += render_markdown(text, body_wrap_w, None).len();
                                 }
                             }
                             ContentBlock::ToolGroup(g) => {
@@ -838,19 +925,22 @@ mod tests {
     }
 
     #[test]
-    fn open_thread_resets_scroll_on_new_thread() {
+    fn open_thread_scrolls_to_bottom_on_new_thread() {
         let mut panel = CommentPanel::new();
-        panel.scroll_offset = 10;
-        panel.open_thread("t1".to_string(), Vec::new(), "f.rs".to_string());
-        assert_eq!(panel.scroll_offset, 0);
+        panel.scroll.offset = 10;
+        panel.open_thread("t1".to_string(), Vec::new(), "f.rs".to_string(), Vec::new());
+        // New thread sets pending_bottom (resolved at render time when total is known)
+        assert!(panel.scroll.pending_bottom);
 
         // Same thread should preserve scroll
-        panel.scroll_offset = 5;
-        panel.open_thread("t1".to_string(), Vec::new(), "f.rs".to_string());
-        assert_eq!(panel.scroll_offset, 5);
+        panel.scroll.pending_bottom = false;
+        panel.scroll.offset = 5;
+        panel.open_thread("t1".to_string(), Vec::new(), "f.rs".to_string(), Vec::new());
+        assert_eq!(panel.scroll.offset, 5);
+        assert!(!panel.scroll.pending_bottom);
 
-        // Different thread resets
-        panel.open_thread("t2".to_string(), Vec::new(), "f.rs".to_string());
-        assert_eq!(panel.scroll_offset, 0);
+        // Different thread scrolls to bottom again
+        panel.open_thread("t2".to_string(), Vec::new(), "f.rs".to_string(), Vec::new());
+        assert!(panel.scroll.pending_bottom);
     }
 }

@@ -166,6 +166,17 @@ impl CommentStore {
             .filter(|c| c.path == path && !c.resolved && c.in_reply_to_id.is_none())
             .collect()
     }
+
+    /// Returns a map of filename → unresolved thread count for all files.
+    pub fn thread_counts_by_file(&self) -> std::collections::HashMap<String, usize> {
+        self.comments
+            .iter()
+            .filter(|c| !c.resolved && c.in_reply_to_id.is_none())
+            .fold(std::collections::HashMap::new(), |mut acc, c| {
+                *acc.entry(c.path.clone()).or_insert(0) += 1;
+                acc
+            })
+    }
 }
 
 #[cfg(test)]

@@ -16,6 +16,7 @@ use super::composing_state::ComposingState;
 use super::copilot_state::{CopilotState, CompletedReply, ToolCall, ToolGroup, ToolStatus};
 use super::diff_viewer::{DiffLineData, DiffViewer, LayoutInfo, LineType, TREE_WIDTH};
 use super::diff_viewer::panel::{self, PanelComment};
+use super::scroll::Scrollable;
 use super::styles::DiffColors;
 
 pub enum Pane {
@@ -38,6 +39,12 @@ pub enum DiffLoaded {
     },
 }
 
+pub struct HighlightResult {
+    pub filename: String,
+    pub hl_new: Vec<Vec<(ratatui::style::Style, String)>>,
+    pub hl_old: Vec<Vec<(ratatui::style::Style, String)>>,
+}
+
 pub struct LocalDiff {
     pub viewer: DiffViewer,
     pub repo_root: String,
@@ -48,11 +55,15 @@ pub struct LocalDiff {
     pub copilot_state: CopilotState,
     pub username: Option<String>,
     pub diff_tx: mpsc::UnboundedSender<DiffLoaded>,
+    pub highlight_tx: mpsc::UnboundedSender<HighlightResult>,
+    pub highlight_rx: mpsc::UnboundedReceiver<HighlightResult>,
+    pub colors: DiffColors,
 }
 
 impl LocalDiff {
     pub fn new(repo_root: String, mode: DiffMode, diff_tx: mpsc::UnboundedSender<DiffLoaded>) -> Self {
         let comment_store = CommentStore::new(&repo_root, "");
+        let (highlight_tx, highlight_rx) = mpsc::unbounded_channel();
         Self {
             viewer: DiffViewer::new(mode),
             repo_root,
@@ -63,6 +74,9 @@ impl LocalDiff {
             copilot_state: CopilotState::new(),
             username: None,
             diff_tx,
+            highlight_tx,
+            highlight_rx,
+            colors: DiffColors::default(),
         }
     }
 
@@ -115,47 +129,113 @@ impl LocalDiff {
         match result {
             DiffLoaded::Full { files } => {
                 self.viewer.set_files(files);
-                self.sync_tree_cursor();
+                self.viewer.file_list.sync_cursor();
             }
             DiffLoaded::Reload { files, branch } => {
                 if let Some(b) = branch {
                     self.base_branch = b;
                 }
+                self.viewer.clear_highlight_cache();
                 self.viewer.update_files(files);
-                self.sync_tree_cursor();
+                self.viewer.file_list.sync_cursor();
             }
         }
+        self.viewer.file_list.loaded = true;
         self.refresh_current_file().await;
     }
 
     pub(crate) async fn refresh_current_file(&mut self) {
-        if self.viewer.files.is_empty() {
-            self.viewer.set_diff_lines(Vec::new(), "", "", "");
+        if self.viewer.file_list.files.is_empty() {
+            self.viewer.set_diff_lines(Vec::new(), "");
             return;
         }
 
-        let idx = self.viewer.current_file_idx.min(self.viewer.files.len() - 1);
-        let filename = self.viewer.files[idx].filename.clone();
-        let patch = self.viewer.files[idx].patch.clone();
+        let idx = self.viewer.file_list.current_file_idx.min(self.viewer.file_list.files.len() - 1);
+        let filename = self.viewer.file_list.files[idx].filename.clone();
+        let patch = self.viewer.file_list.files[idx].patch.clone();
         let diff_lines = parse_patch_to_diff_lines(&patch);
 
-        // Read full file content for proper full-file syntax highlighting
-        let new_content = crate::git::file_content(&self.repo_root, &filename)
-            .await
-            .unwrap_or_default();
-
-        let old_content = crate::git::file_content_at_ref(&self.repo_root, &filename, "HEAD")
-            .await
-            .unwrap_or_default();
-
-        self.viewer
-            .set_diff_lines(diff_lines, &filename, &new_content, &old_content);
-
+        self.viewer.set_diff_lines(diff_lines, &filename);
         self.place_file_comments(&filename);
+
+        // Highlight current file; prefetch chain continues in apply_highlight_result
+        self.spawn_highlight(&filename);
+    }
+
+    fn spawn_highlight(&self, filename: &str) {
+        let repo_root = self.repo_root.clone();
+        let fname = filename.to_string();
+        let highlighter = self.viewer.highlights.highlighter.clone();
+        let tx = self.highlight_tx.clone();
+
+        tokio::spawn(async move {
+            let new_content = crate::git::file_content(&repo_root, &fname)
+                .await
+                .unwrap_or_default();
+            let old_content = crate::git::file_content_at_ref(&repo_root, &fname, "HEAD")
+                .await
+                .unwrap_or_default();
+
+            let hl_new = if !new_content.is_empty() {
+                highlighter.highlight_file(&new_content, &fname)
+            } else {
+                Vec::new()
+            };
+            let hl_old = if !old_content.is_empty() {
+                highlighter.highlight_file(&old_content, &fname)
+            } else {
+                Vec::new()
+            };
+
+            let _ = tx.send(HighlightResult {
+                filename: fname,
+                hl_new,
+                hl_old,
+            });
+        });
+    }
+
+    /// Apply background highlight results. Always cache; apply to render list only if file matches.
+    /// Then continue prefetching the next uncached file.
+    pub fn apply_highlight_result(&mut self, result: HighlightResult) {
+        let current = self.current_filename();
+        if current == result.filename {
+            self.viewer.apply_highlights(result.hl_new, result.hl_old, &result.filename);
+        } else {
+            self.viewer.highlights.cache_only(
+                result.hl_new,
+                result.hl_old,
+                &result.filename,
+            );
+        }
+
+        // Continue prefetching: find next uncached file fanning out from cursor
+        self.prefetch_next_uncached();
+    }
+
+    /// Spawn a highlight task for the nearest uncached file, fanning out from current position.
+    fn prefetch_next_uncached(&self) {
+        let total = self.viewer.file_list.files.len();
+        if total == 0 {
+            return;
+        }
+        let center = self.viewer.file_list.current_file_idx.min(total - 1);
+
+        for offset in 1..total {
+            for candidate in [center.wrapping_add(offset), center.wrapping_sub(offset)] {
+                if candidate < total {
+                    let fname = &self.viewer.file_list.files[candidate].filename;
+                    if !self.viewer.highlights.is_cached(fname) {
+                        self.spawn_highlight(fname);
+                        return;
+                    }
+                }
+            }
+        }
     }
 
     /// Insert comment thread markers into the render list for the given file.
-    fn place_file_comments(&mut self, filename: &str) {
+    pub(crate) fn place_file_comments(&mut self, filename: &str) {
         use crate::ui::diff_viewer::render_list::CommentPosition;
 
         let roots: Vec<CommentPosition> = self
@@ -219,35 +299,26 @@ impl LocalDiff {
     }
 
     pub async fn next_file(&mut self) {
-        if !self.viewer.files.is_empty() {
-            self.viewer.current_file_idx = (self.viewer.current_file_idx + 1) % self.viewer.files.len();
-            self.viewer.diff_cursor = 0;
-            self.viewer.viewport_offset = 0;
-            self.sync_tree_cursor();
+        if !self.viewer.file_list.files.is_empty() {
+            self.viewer.file_list.current_file_idx = (self.viewer.file_list.current_file_idx + 1) % self.viewer.file_list.files.len();
+            self.viewer.scroll.cursor = 0;
+            self.viewer.scroll.offset = 0;
+            self.viewer.file_list.sync_cursor();
             self.refresh_current_file().await;
         }
     }
 
     pub async fn prev_file(&mut self) {
-        if !self.viewer.files.is_empty() {
-            if self.viewer.current_file_idx == 0 {
-                self.viewer.current_file_idx = self.viewer.files.len() - 1;
+        if !self.viewer.file_list.files.is_empty() {
+            if self.viewer.file_list.current_file_idx == 0 {
+                self.viewer.file_list.current_file_idx = self.viewer.file_list.files.len() - 1;
             } else {
-                self.viewer.current_file_idx -= 1;
+                self.viewer.file_list.current_file_idx -= 1;
             }
-            self.viewer.diff_cursor = 0;
-            self.viewer.viewport_offset = 0;
-            self.sync_tree_cursor();
+            self.viewer.scroll.cursor = 0;
+            self.viewer.scroll.offset = 0;
+            self.viewer.file_list.sync_cursor();
             self.refresh_current_file().await;
-        }
-    }
-
-    fn sync_tree_cursor(&mut self) {
-        for (i, entry) in self.viewer.tree_entries.iter().enumerate() {
-            if !entry.is_dir && entry.file_index as usize == self.viewer.current_file_idx {
-                self.viewer.tree_cursor = i;
-                break;
-            }
         }
     }
 
@@ -348,14 +419,11 @@ impl LocalDiff {
             });
 
             let file_path = self.current_filename();
-            self.viewer.panel.open_thread(root_id, comments, file_path);
+            let ctx = self.viewer.panel.diff_context.clone();
+            self.viewer.panel.open_thread(root_id, comments, file_path, ctx);
 
             // Auto-scroll to bottom so streaming content is visible
-            let total = self.viewer.panel.content_line_count();
-            let vp = self.viewer.viewport_height() as usize;
-            if total > vp {
-                self.viewer.panel.scroll_offset = total.saturating_sub(vp);
-            }
+            self.viewer.panel.goto_bottom();
         }
     }
 
@@ -378,7 +446,8 @@ impl LocalDiff {
 
         let comments = self.build_panel_comments(&root_id);
         let file_path = self.current_filename();
-        self.viewer.panel.open_thread(root_id, comments, file_path);
+        let ctx = self.viewer.panel.diff_context.clone();
+        self.viewer.panel.open_thread(root_id, comments, file_path, ctx);
     }
 
     /// Open a thread in the panel (unconditionally — used for explicit user actions).
@@ -389,9 +458,17 @@ impl LocalDiff {
             .map(|c| c.id.clone())
             .unwrap_or_else(|| comment_id.to_string());
 
+        let resolved = self
+            .comment_store
+            .find_thread_root(comment_id)
+            .map(|c| c.resolved)
+            .unwrap_or(false);
+
         let comments = self.build_panel_comments(&root_id);
         let file_path = self.current_filename();
-        self.viewer.panel.open_thread(root_id, comments, file_path);
+        let ctx = self.viewer.panel_diff_context(&self.colors);
+        self.viewer.panel.open_thread(root_id, comments, file_path, ctx);
+        self.viewer.panel.resolved = resolved;
     }
 
     fn build_panel_comments(&self, root_id: &str) -> Vec<PanelComment> {
@@ -450,10 +527,11 @@ impl LocalDiff {
             .collect()
     }
 
-    fn current_filename(&self) -> String {
+    pub(crate) fn current_filename(&self) -> String {
         self.viewer
+            .file_list
             .files
-            .get(self.viewer.current_file_idx)
+            .get(self.viewer.file_list.current_file_idx)
             .map(|f| f.filename.clone())
             .unwrap_or_default()
     }
@@ -524,7 +602,7 @@ impl LocalDiff {
         };
         let _ = self.comment_store.add(comment);
 
-        let diff_hunk = self.build_diff_context(self.viewer.diff_cursor);
+        let diff_hunk = self.build_diff_context(self.viewer.scroll.cursor);
         let prompt = format!(
             "The user left a comment on `{}` line {} ({}):\n\n{}\n\nDiff context:\n```\n{}\n```\n\nPlease provide a helpful response.",
             path, line, side, body, diff_hunk
@@ -553,9 +631,10 @@ impl LocalDiff {
             created_at: chrono_now(),
         });
         let file_path = self.current_filename();
-        self.viewer.panel.open_thread(root_id.clone(), comments, file_path);
+        let ctx = self.viewer.panel_diff_context(&self.colors);
+        self.viewer.panel.open_thread(root_id.clone(), comments, file_path, ctx);
         self.viewer.panel_focused = true;
-        self.viewer.tree_focused = false;
+        self.viewer.file_list.focused = false;
 
         tracing::info!("Sending prompt to copilot agent for {comment_id}");
         if let Err(e) = agent.send(&comment_id, &prompt).await {
@@ -570,7 +649,8 @@ impl LocalDiff {
                 created_at: chrono_now(),
             });
             let file_path = self.current_filename();
-            self.viewer.panel.open_thread(root_id, comments, file_path);
+            let ctx = self.viewer.panel.diff_context.clone();
+            self.viewer.panel.open_thread(root_id, comments, file_path, ctx);
         }
     }
 
@@ -595,26 +675,29 @@ impl LocalDiff {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect, colors: &DiffColors) {
-        let file = self.viewer.files.get(self.viewer.current_file_idx);
+        let file = self.viewer.file_list.files.get(self.viewer.file_list.current_file_idx);
         let info = LayoutInfo {
             mode: self.mode,
             branch_name: self.base_branch.clone(),
-            file_count: self.viewer.files.len(),
-            current_file_idx: self.viewer.current_file_idx,
+            file_count: self.viewer.file_list.files.len(),
+            current_file_idx: self.viewer.file_list.current_file_idx,
             current_filename: file.map(|f| f.filename.clone()).unwrap_or_default(),
             additions: file.map(|f| f.additions).unwrap_or(0),
             deletions: file.map(|f| f.deletions).unwrap_or(0),
             help_line: self.build_help_line(),
+            comment_counts: self.comment_store.thread_counts_by_file(),
         };
 
         // Show composing input in the panel reply area
         if self.composing.is_active() {
             if !self.viewer.panel.visible {
                 let file_path = self.current_filename();
+                let ctx = self.viewer.panel_diff_context(colors);
                 self.viewer.panel.open_thread(
                     "composing".to_string(),
                     Vec::new(),
                     file_path,
+                    ctx,
                 );
             }
             self.viewer.panel.set_reply_view(
@@ -641,11 +724,12 @@ impl LocalDiff {
         if self.viewer.panel.visible {
             hints.push(h("esc", "close panel"));
             hints.push(h("r", "reply"));
+            hints.push(h("x", "resolve"));
             hints.push(h("q", "close panel"));
             return hints;
         }
 
-        if self.viewer.tree_focused {
+        if self.viewer.file_list.focused {
             hints.push(h("j/k", "navigate"));
             hints.push(h("l", "focus diff"));
             hints.push(h("^j/^k", "next/prev file"));
@@ -655,7 +739,7 @@ impl LocalDiff {
                 _ => {}
             }
             hints.push(h("↵", "open file"));
-        } else if !self.viewer.files.is_empty() {
+        } else if !self.viewer.file_list.files.is_empty() {
             hints.push(h("j/k", "navigate"));
             hints.push(h("^j/^k", "next/prev file"));
             hints.push(h("f", "focus tree"));

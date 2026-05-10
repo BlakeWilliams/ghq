@@ -1,7 +1,7 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use super::super::styles::DiffColors;
+use crate::ui::styles::DiffColors;
 use crate::ui::diff_viewer::render_list::LineType;
 
 pub fn render_diff_line(

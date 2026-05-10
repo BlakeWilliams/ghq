@@ -24,6 +24,7 @@ use crate::git::watcher::{RepoWatcher, WatchEvent};
 use crate::github::CachedClient;
 
 use super::local_diff::{DiffLoaded, LocalDiff, Pane};
+use super::scroll::Scrollable;
 use super::styles::DiffColors;
 
 pub enum ActiveView {
@@ -103,8 +104,10 @@ impl App {
         // individually with nil checks. from_palette uses unwrap_or fallbacks.
         if resolved > 0 {
             let theme = crate::ui::highlight::build_theme_from_palette(&palette);
-            self.local_diff.viewer.highlighter.set_theme(theme);
+            self.local_diff.viewer.highlights.highlighter.set_theme(theme);
+            self.local_diff.viewer.clear_highlight_cache();
             self.diff_colors = DiffColors::from_palette(&palette);
+            self.local_diff.colors = self.diff_colors.clone();
             tracing::info!("Using palette-derived colors and theme");
         } else {
             tracing::info!("No palette colors resolved, using defaults");
@@ -277,6 +280,13 @@ impl App {
                 diff_result = self.diff_rx.recv() => {
                     if let Some(result) = diff_result {
                         self.local_diff.apply_diff_loaded(result).await;
+                        redraw.notify_one();
+                    }
+                }
+
+                hl_result = self.local_diff.highlight_rx.recv() => {
+                    if let Some(result) = hl_result {
+                        self.local_diff.apply_highlight_result(result);
                         redraw.notify_one();
                     }
                 }

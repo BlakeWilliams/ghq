@@ -2,6 +2,7 @@ use std::sync::Arc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::agent::AgentRunner;
+use crate::ui::scroll::Scrollable;
 use super::LocalDiff;
 
 pub async fn handle_key(
@@ -29,14 +30,14 @@ pub async fn handle_key(
         KeyCode::Char('h') | KeyCode::Left if !ctrl => {
             if local_diff.viewer.panel_focused {
                 local_diff.viewer.panel_focused = false;
-                local_diff.viewer.tree_focused = false;
-            } else if !local_diff.viewer.tree_focused {
-                local_diff.viewer.tree_focused = true;
+                local_diff.viewer.file_list.focused = false;
+            } else if !local_diff.viewer.file_list.focused {
+                local_diff.viewer.file_list.focused = true;
             }
         }
         KeyCode::Char('l') | KeyCode::Right if !ctrl => {
-            if local_diff.viewer.tree_focused {
-                local_diff.viewer.tree_focused = false;
+            if local_diff.viewer.file_list.focused {
+                local_diff.viewer.file_list.focused = false;
                 local_diff.viewer.panel_focused = false;
             } else if local_diff.viewer.panel.visible && !local_diff.viewer.panel_focused {
                 local_diff.viewer.panel_focused = true;
@@ -45,76 +46,74 @@ pub async fn handle_key(
         KeyCode::Char('f') if !ctrl => {
             if local_diff.viewer.panel_focused {
                 local_diff.viewer.panel_focused = false;
-                local_diff.viewer.tree_focused = true;
-            } else if local_diff.viewer.tree_focused {
-                local_diff.viewer.tree_focused = false;
+                local_diff.viewer.file_list.focused = true;
+            } else if local_diff.viewer.file_list.focused {
+                local_diff.viewer.file_list.focused = false;
             } else if local_diff.viewer.panel.visible {
                 local_diff.viewer.panel_focused = true;
             } else {
-                local_diff.viewer.tree_focused = true;
+                local_diff.viewer.file_list.focused = true;
             }
         }
 
         // Navigation within focused pane
-        KeyCode::Char('j') if !ctrl && !shift => {
+        KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down if !ctrl => {
             if local_diff.viewer.panel_focused {
                 local_diff.viewer.panel.scroll_down(1);
-            } else if local_diff.viewer.tree_focused {
+            } else if local_diff.viewer.file_list.focused {
                 move_tree_cursor(local_diff, 1);
             } else {
+                let extending = shift || key.code == KeyCode::Char('J');
+                if extending {
+                    if local_diff.viewer.selection_start.is_none() {
+                        local_diff.viewer.selection_start = Some(local_diff.viewer.scroll.cursor);
+                    }
+                } else {
+                    local_diff.viewer.selection_start = None;
+                }
                 local_diff.viewer.scroll_down(1);
             }
         }
-        KeyCode::Char('k') if !ctrl && !shift => {
+        KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up if !ctrl => {
             if local_diff.viewer.panel_focused {
                 local_diff.viewer.panel.scroll_up(1);
-            } else if local_diff.viewer.tree_focused {
+            } else if local_diff.viewer.file_list.focused {
                 move_tree_cursor(local_diff, -1);
             } else {
-                local_diff.viewer.scroll_up(1);
-            }
-        }
-        KeyCode::Down => {
-            if local_diff.viewer.panel_focused {
-                local_diff.viewer.panel.scroll_down(1);
-            } else if local_diff.viewer.tree_focused {
-                move_tree_cursor(local_diff, 1);
-            } else {
-                local_diff.viewer.scroll_down(1);
-            }
-        }
-        KeyCode::Up => {
-            if local_diff.viewer.panel_focused {
-                local_diff.viewer.panel.scroll_up(1);
-            } else if local_diff.viewer.tree_focused {
-                move_tree_cursor(local_diff, -1);
-            } else {
+                let extending = shift || key.code == KeyCode::Char('K');
+                if extending {
+                    if local_diff.viewer.selection_start.is_none() {
+                        local_diff.viewer.selection_start = Some(local_diff.viewer.scroll.cursor);
+                    }
+                } else {
+                    local_diff.viewer.selection_start = None;
+                }
                 local_diff.viewer.scroll_up(1);
             }
         }
 
         // Enter: select file in tree, toggle panel on thread, start comment on diff line
         KeyCode::Enter => {
-            if local_diff.viewer.tree_focused {
-                let cursor = local_diff.viewer.tree_cursor;
-                let is_dir = cursor < local_diff.viewer.tree_entries.len()
-                    && local_diff.viewer.tree_entries[cursor].is_dir;
+            if local_diff.viewer.file_list.focused {
+                let cursor = local_diff.viewer.file_list.cursor();
+                let is_dir = cursor < local_diff.viewer.file_list.entries.len()
+                    && local_diff.viewer.file_list.entries[cursor].is_dir;
                 if !is_dir {
                     select_tree_entry(local_diff).await;
-                    local_diff.viewer.tree_focused = false;
+                    local_diff.viewer.file_list.focused = false;
                 }
             } else if local_diff.viewer.panel.visible {
                 // Panel is open — close it
                 local_diff.viewer.panel.close();
                 local_diff.viewer.panel_focused = false;
             } else if !local_diff.viewer.render_list.is_empty() {
-                let cursor = local_diff.viewer.diff_cursor;
+                let cursor = local_diff.viewer.scroll.cursor;
                 // Check if this diff line has a badge — open thread panel
                 if let Some(badge) = local_diff.viewer.render_list.badge_at(cursor) {
                     let thread_key = badge.thread_key.clone();
                     local_diff.open_panel_for_thread(&thread_key);
                     local_diff.viewer.panel_focused = true;
-                    local_diff.viewer.tree_focused = false;
+                    local_diff.viewer.file_list.focused = false;
                 } else if let Some(crate::ui::diff_viewer::RenderItem::DiffLine(dl)) =
                     local_diff.viewer.render_list.get(cursor)
                 {
@@ -141,7 +140,7 @@ pub async fn handle_key(
             if local_diff.viewer.panel_focused {
                 let half = local_diff.viewer.viewport_height() as usize / 2;
                 local_diff.viewer.panel.scroll_down(half);
-            } else if local_diff.viewer.tree_focused {
+            } else if local_diff.viewer.file_list.focused {
                 let half = local_diff.viewer.viewport_height() as usize / 2;
                 move_tree_cursor_n(local_diff, half as i32);
             } else {
@@ -152,7 +151,7 @@ pub async fn handle_key(
             if local_diff.viewer.panel_focused {
                 let half = local_diff.viewer.viewport_height() as usize / 2;
                 local_diff.viewer.panel.scroll_up(half);
-            } else if local_diff.viewer.tree_focused {
+            } else if local_diff.viewer.file_list.focused {
                 let half = local_diff.viewer.viewport_height() as usize / 2;
                 move_tree_cursor_n(local_diff, -(half as i32));
             } else {
@@ -165,13 +164,13 @@ pub async fn handle_key(
             if local_diff.viewer.waiting_g {
                 local_diff.viewer.waiting_g = false;
                 if local_diff.viewer.panel_focused {
-                    local_diff.viewer.panel.scroll_offset = 0;
-                } else if local_diff.viewer.tree_focused {
-                    let first_file = local_diff.viewer.tree_entries
+                    local_diff.viewer.panel.goto_top();
+                } else if local_diff.viewer.file_list.focused {
+                    let first_file = local_diff.viewer.file_list.entries
                         .iter()
                         .position(|e| !e.is_dir)
                         .unwrap_or(0);
-                    local_diff.viewer.tree_cursor = first_file;
+                    local_diff.viewer.file_list.set_cursor(first_file);
                 } else {
                     local_diff.viewer.goto_top();
                 }
@@ -181,15 +180,14 @@ pub async fn handle_key(
         }
         KeyCode::Char('G') => {
             if local_diff.viewer.panel_focused {
-                let max = local_diff.viewer.panel.content_line_count().saturating_sub(1);
-                local_diff.viewer.panel.scroll_offset = max;
-            } else if local_diff.viewer.tree_focused {
+                local_diff.viewer.panel.goto_bottom();
+            } else if local_diff.viewer.file_list.focused {
                 // Jump to last non-directory entry
-                let last_file = local_diff.viewer.tree_entries
+                let last_file = local_diff.viewer.file_list.entries
                     .iter()
                     .rposition(|e| !e.is_dir)
-                    .unwrap_or(local_diff.viewer.tree_entries.len().saturating_sub(1));
-                local_diff.viewer.tree_cursor = last_file;
+                    .unwrap_or(local_diff.viewer.file_list.entries.len().saturating_sub(1));
+                local_diff.viewer.file_list.set_cursor(last_file);
             } else {
                 local_diff.viewer.goto_bottom();
             }
@@ -221,21 +219,21 @@ pub async fn handle_key(
         }
         KeyCode::Char('n') if !ctrl => {
             if let Some(line) = local_diff.viewer.search.next_match() {
-                local_diff.viewer.diff_cursor = line;
+                local_diff.viewer.scroll.cursor = line;
                 local_diff.viewer.scroll_down(0);
             }
         }
         KeyCode::Char('N') => {
             if let Some(line) = local_diff.viewer.search.prev_match() {
-                local_diff.viewer.diff_cursor = line;
+                local_diff.viewer.scroll.cursor = line;
                 local_diff.viewer.scroll_up(0);
             }
         }
 
         // Ask Copilot about the current hunk
         KeyCode::Char('c') if !ctrl => {
-            if !local_diff.viewer.tree_focused && !local_diff.viewer.render_list.is_empty() {
-                let cursor = local_diff.viewer.diff_cursor;
+            if !local_diff.viewer.file_list.focused && !local_diff.viewer.render_list.is_empty() {
+                let cursor = local_diff.viewer.scroll.cursor;
                 if let Some(dl) = local_diff.viewer.render_list.get_diff_line(cursor) {
                     let filename = local_diff.current_filename();
                     let line = dl.new_line_no.or(dl.old_line_no).unwrap_or(0);
@@ -247,8 +245,8 @@ pub async fn handle_key(
 
         // Reply to existing comment thread
         KeyCode::Char('r') if !ctrl => {
-            if !local_diff.viewer.tree_focused && !local_diff.viewer.render_list.is_empty() {
-                let cursor = local_diff.viewer.diff_cursor;
+            if !local_diff.viewer.file_list.focused && !local_diff.viewer.render_list.is_empty() {
+                let cursor = local_diff.viewer.scroll.cursor;
                 if let Some(badge) = local_diff.viewer.render_list.badge_at(cursor) {
                     let thread_key = badge.thread_key.clone();
                     let filename = local_diff.current_filename();
@@ -276,21 +274,32 @@ pub async fn handle_key(
             local_diff.viewer.panel_focused = false;
         }
 
+        // Resolve/unresolve thread
+        KeyCode::Char('x') if !ctrl && local_diff.viewer.panel.visible => {
+            if let Some(root_id) = local_diff.viewer.panel.thread_key.clone() {
+                let new_resolved = !local_diff.viewer.panel.resolved;
+                let _ = local_diff.comment_store.resolve(&root_id, new_resolved);
+                local_diff.viewer.panel.resolved = new_resolved;
+                let filename = local_diff.current_filename();
+                local_diff.place_file_comments(&filename);
+            }
+        }
+
         _ => {}
     }
 }
 
 pub fn move_tree_cursor(local_diff: &mut LocalDiff, delta: i32) {
-    let entries = &local_diff.viewer.tree_entries;
+    let entries = &local_diff.viewer.file_list.entries;
     if entries.is_empty() {
         return;
     }
     let max = entries.len() as i32 - 1;
     let step = if delta > 0 { 1 } else { -1 };
-    let mut pos = local_diff.viewer.tree_cursor as i32 + step;
+    let mut pos = local_diff.viewer.file_list.cursor() as i32 + step;
     while pos >= 0 && pos <= max {
         if !entries[pos as usize].is_dir {
-            local_diff.viewer.tree_cursor = pos as usize;
+            local_diff.viewer.file_list.set_cursor(pos as usize);
             return;
         }
         pos += step;
@@ -312,30 +321,30 @@ fn move_tree_cursor_n(local_diff: &mut LocalDiff, n: i32) {
 }
 
 async fn select_tree_entry(local_diff: &mut LocalDiff) {
-    let cursor = local_diff.viewer.tree_cursor;
-    if cursor >= local_diff.viewer.tree_entries.len() {
+    let cursor = local_diff.viewer.file_list.cursor();
+    if cursor >= local_diff.viewer.file_list.entries.len() {
         return;
     }
-    let entry = &local_diff.viewer.tree_entries[cursor];
+    let entry = &local_diff.viewer.file_list.entries[cursor];
     if entry.is_dir {
         return;
     }
     let file_idx = entry.file_index as usize;
-    if file_idx >= local_diff.viewer.files.len() {
+    if file_idx >= local_diff.viewer.file_list.files.len() {
         return;
     }
-    local_diff.viewer.current_file_idx = file_idx;
-    local_diff.viewer.diff_cursor = 0;
-    local_diff.viewer.viewport_offset = 0;
+    local_diff.viewer.file_list.current_file_idx = file_idx;
+    local_diff.viewer.scroll.cursor = 0;
+    local_diff.viewer.scroll.offset = 0;
     local_diff.refresh_current_file().await;
 }
 
 async fn stage_current_line(local_diff: &mut LocalDiff, repo_root: &str, unstage: bool) {
-    if local_diff.viewer.files.is_empty() {
+    if local_diff.viewer.file_list.files.is_empty() {
         return;
     }
-    let file = &local_diff.viewer.files[local_diff.viewer.current_file_idx];
-    let cursor = local_diff.viewer.diff_cursor;
+    let file = &local_diff.viewer.file_list.files[local_diff.viewer.file_list.current_file_idx];
+    let cursor = local_diff.viewer.scroll.cursor;
 
     let patch_lines: Vec<&str> = file.patch.lines().collect();
     if cursor >= patch_lines.len() {
@@ -410,11 +419,11 @@ async fn stage_current_line(local_diff: &mut LocalDiff, repo_root: &str, unstage
 }
 
 async fn stage_current_hunk(local_diff: &mut LocalDiff, repo_root: &str, unstage: bool) {
-    if local_diff.viewer.files.is_empty() {
+    if local_diff.viewer.file_list.files.is_empty() {
         return;
     }
-    let file = &local_diff.viewer.files[local_diff.viewer.current_file_idx];
-    let cursor = local_diff.viewer.diff_cursor;
+    let file = &local_diff.viewer.file_list.files[local_diff.viewer.file_list.current_file_idx];
+    let cursor = local_diff.viewer.scroll.cursor;
 
     let patch_lines: Vec<&str> = file.patch.lines().collect();
     if cursor >= patch_lines.len() {

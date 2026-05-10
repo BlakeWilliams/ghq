@@ -11,6 +11,7 @@ pub struct Picker {
     matcher: SkimMatcherV2,
 }
 
+#[derive(Clone)]
 pub struct PickerItem {
     pub label: String,
     pub description: String,
@@ -101,5 +102,89 @@ impl Picker {
     pub fn pop_char(&mut self) {
         self.query.pop();
         self.filter();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn items() -> Vec<PickerItem> {
+        vec![
+            PickerItem { label: "src/main.rs".into(), description: "+10 -5".into(), value: "src/main.rs".into() },
+            PickerItem { label: "src/lib.rs".into(), description: "+3 -1".into(), value: "src/lib.rs".into() },
+            PickerItem { label: "Cargo.toml".into(), description: "+1 -0".into(), value: "Cargo.toml".into() },
+            PickerItem { label: "README.md".into(), description: "".into(), value: "README.md".into() },
+        ]
+    }
+
+    #[test]
+    fn empty_query_shows_all() {
+        let p = Picker::new("Files", items());
+        assert_eq!(p.filtered.len(), 4);
+        assert_eq!(p.cursor, 0);
+    }
+
+    #[test]
+    fn fuzzy_filter_narrows() {
+        let mut p = Picker::new("Files", items());
+        p.push_char('m');
+        p.push_char('a');
+        p.push_char('i');
+        // "mai" should match "src/main.rs" and "README.md" (fuzzy)
+        assert!(p.filtered.len() <= 4);
+        assert!(p.filtered.len() >= 1);
+        // Best match should be main.rs
+        let best = &p.items[p.filtered[0].index];
+        assert!(best.label.contains("main"));
+    }
+
+    #[test]
+    fn cursor_movement_clamps() {
+        let mut p = Picker::new("Test", items());
+        p.move_up();
+        assert_eq!(p.cursor, 0); // can't go above 0
+
+        p.move_down();
+        p.move_down();
+        p.move_down();
+        assert_eq!(p.cursor, 3);
+        p.move_down();
+        assert_eq!(p.cursor, 3); // can't exceed len-1
+    }
+
+    #[test]
+    fn selected_returns_correct_item() {
+        let mut p = Picker::new("Test", items());
+        let first = p.selected().unwrap();
+        assert_eq!(first.value, "src/main.rs");
+
+        p.move_down();
+        let second = p.selected().unwrap();
+        assert_eq!(second.value, "src/lib.rs");
+    }
+
+    #[test]
+    fn backspace_widens_results() {
+        let mut p = Picker::new("Test", items());
+        p.push_char('x');
+        p.push_char('y');
+        p.push_char('z');
+        let narrow = p.filtered.len();
+        p.pop_char();
+        p.pop_char();
+        p.pop_char();
+        assert_eq!(p.filtered.len(), 4); // back to showing all
+        assert!(p.filtered.len() >= narrow);
+    }
+
+    #[test]
+    fn filter_resets_cursor() {
+        let mut p = Picker::new("Test", items());
+        p.move_down();
+        p.move_down();
+        assert_eq!(p.cursor, 2);
+        p.push_char('m');
+        assert_eq!(p.cursor, 0); // reset on filter
     }
 }

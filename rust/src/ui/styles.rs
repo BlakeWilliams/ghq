@@ -3,6 +3,46 @@ use ratatui::style::{Color, Modifier, Style};
 use crate::git::diff::DiffMode;
 use crate::terminal::palette::Palette;
 
+struct ColorConstants {
+    white: (u8, u8, u8),
+    black: (u8, u8, u8),
+    fallback_bg: (u8, u8, u8),
+    fallback_border: (u8, u8, u8),
+}
+
+const COLORS: ColorConstants = ColorConstants {
+    white: (255, 255, 255),
+    black: (0, 0, 0),
+    fallback_bg: (30, 30, 30),
+    fallback_border: (128, 128, 128),
+};
+
+struct BlendFactors {
+    selection: f64,
+    dim: f64,
+    add_bg: f64,
+    add_selected: f64,
+    del_bg: f64,
+    del_selected: f64,
+    hunk_bg: f64,
+    hunk_selected: f64,
+    contrast_boost: f64,
+    search_current: f64,
+}
+
+const BLEND: BlendFactors = BlendFactors {
+    selection: 0.12,
+    dim: 0.35,
+    add_bg: 0.08,
+    add_selected: 0.25,
+    del_bg: 0.08,
+    del_selected: 0.25,
+    hunk_bg: 0.10,
+    hunk_selected: 0.25,
+    contrast_boost: 0.3,
+    search_current: 0.7,
+};
+
 #[derive(Debug, Clone)]
 pub struct DiffColors {
     pub add_fg: Color,
@@ -19,6 +59,7 @@ pub struct DiffColors {
     pub selected_ctx_bg: Color,
     pub selected_hunk_bg: Color,
     pub search_match_bg: Color,
+    pub search_current_bg: Color,
     pub search_match_fg: Color,
     pub selection_bg: Color,
     pub border_fg: Color,
@@ -51,7 +92,7 @@ fn ensure_contrast(fg: (u8, u8, u8), bg: (u8, u8, u8)) -> (u8, u8, u8) {
     if relative_luminance(fg) - relative_luminance(bg) > 0.15 {
         return fg;
     }
-    blend((255, 255, 255), fg, 0.3)
+    blend(COLORS.white, fg, BLEND.contrast_boost)
 }
 
 /// Lualine's brightness_modifier: channel = clamp(channel + channel * pct / 100).
@@ -70,7 +111,7 @@ fn or_default(c: Option<(u8, u8, u8)>, fallback: (u8, u8, u8)) -> (u8, u8, u8) {
 
 impl DiffColors {
     pub fn from_palette(palette: &Palette) -> Self {
-        let bg = palette.colors[0].unwrap_or((30, 30, 30));
+        let bg = palette.colors[0].unwrap_or(COLORS.fallback_bg);
         let green = palette.colors[2];
         let red = palette.colors[1];
         let blue = palette.colors[4];
@@ -81,26 +122,26 @@ impl DiffColors {
         // Selection tint: white on dark bg, black on light bg
         let bg_lum = relative_luminance(bg);
         let select_tint = if bg_lum < 0.5 {
-            (255u8, 255u8, 255u8)
+            COLORS.white
         } else {
-            (0u8, 0u8, 0u8)
+            COLORS.black
         };
-        let select_bg = blend(select_tint, bg, 0.12);
+        let select_bg = blend(select_tint, bg, BLEND.selection);
 
-        let border = or_default(bright_black, (128, 128, 128));
+        let border = or_default(bright_black, COLORS.fallback_border);
 
         // Chrome color: brightness-modified bg (+40% dark, -20% light)
         let chrome_pct = if bg_lum < 0.5 { 40.0 } else { -20.0 };
         let chrome = brightness_modify(bg.0, bg.1, bg.2, chrome_pct);
 
         // Dim color for dimmed text (safe on both light/dark)
-        let dim = blend(select_tint, bg, 0.35);
+        let dim = blend(select_tint, bg, BLEND.dim);
 
         // Add colors
         let (add_fg_c, add_bg_c, selected_add_bg_c) = if let Some(g) = green {
-            let add_bg = blend(g, bg, 0.08);
+            let add_bg = blend(g, bg, BLEND.add_bg);
             let add_fg = ensure_contrast(g, add_bg);
-            let selected_add = blend(g, bg, 0.25);
+            let selected_add = blend(g, bg, BLEND.add_selected);
             (rgb(add_fg), rgb(add_bg), rgb(selected_add))
         } else {
             (Color::Green, Color::Reset, Color::DarkGray)
@@ -108,9 +149,9 @@ impl DiffColors {
 
         // Del colors
         let (del_fg_c, del_bg_c, selected_del_bg_c) = if let Some(r) = red {
-            let del_bg = blend(r, bg, 0.08);
+            let del_bg = blend(r, bg, BLEND.del_bg);
             let del_fg = ensure_contrast(r, del_bg);
-            let selected_del = blend(r, bg, 0.25);
+            let selected_del = blend(r, bg, BLEND.del_selected);
             (rgb(del_fg), rgb(del_bg), rgb(selected_del))
         } else {
             (Color::Red, Color::Reset, Color::DarkGray)
@@ -119,24 +160,25 @@ impl DiffColors {
         // Hunk colors
         let (hunk_fg_c, hunk_bg_c, selected_hunk_bg_c) =
             if let (Some(b), Some(w)) = (blue, white) {
-                let hunk_bg = blend(b, bg, 0.10);
+                let hunk_bg = blend(b, bg, BLEND.hunk_bg);
                 let hunk_fg = ensure_contrast(w, hunk_bg);
-                let selected_hunk = blend(b, bg, 0.25);
+                let selected_hunk = blend(b, bg, BLEND.hunk_selected);
                 (rgb(hunk_fg), rgb(hunk_bg), rgb(selected_hunk))
             } else {
                 (Color::Cyan, Color::Reset, Color::DarkGray)
             };
 
         // Search match: palette yellow bg, luminance-based fg
-        let (search_bg, search_fg) = if let Some(y) = yellow {
+        let (search_bg, search_current, search_fg) = if let Some(y) = yellow {
             let fg = if relative_luminance(y) > 0.4 {
-                (0u8, 0u8, 0u8)
+                COLORS.black
             } else {
-                (255u8, 255u8, 255u8)
+                COLORS.white
             };
-            (rgb(y), rgb(fg))
+            let current = blend(y, COLORS.white, BLEND.search_current);
+            (rgb(y), rgb(current), rgb(fg))
         } else {
-            (Color::Yellow, Color::Black)
+            (Color::Yellow, Color::LightYellow, Color::Black)
         };
 
         Self {
@@ -154,6 +196,7 @@ impl DiffColors {
             selected_ctx_bg: rgb(select_bg),
             selected_hunk_bg: selected_hunk_bg_c,
             search_match_bg: search_bg,
+            search_current_bg: search_current,
             search_match_fg: search_fg,
             selection_bg: Color::DarkGray,
             border_fg: rgb(border),
@@ -183,6 +226,7 @@ impl Default for DiffColors {
             selected_ctx_bg: Color::DarkGray,
             selected_hunk_bg: Color::DarkGray,
             search_match_bg: Color::Yellow,
+            search_current_bg: Color::LightYellow,
             search_match_fg: Color::Black,
             selection_bg: Color::DarkGray,
             border_fg: Color::DarkGray,

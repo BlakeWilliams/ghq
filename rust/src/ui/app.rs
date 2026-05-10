@@ -319,10 +319,11 @@ impl App {
         }
         self.ctrl_c_count = 0;
 
-        // Quit — but not when composing or panel is focused
+        // Quit — but not when composing, panel is focused, or picker is open
         if key.code == KeyCode::Char('q')
             && !self.local_diff.composing.is_active()
             && !self.local_diff.viewer.panel.visible
+            && self.local_diff.picker.is_none()
         {
             self.should_quit = true;
             return;
@@ -343,7 +344,7 @@ impl App {
                 let pane = self.local_diff.pane_at_column(mouse.column);
                 match pane {
                     Pane::Tree => self.local_diff.viewer.scroll_viewport(-scroll_lines),
-                    Pane::Panel => self.local_diff.viewer.panel.scroll_up(scroll_lines as usize),
+                    Pane::Panel => self.local_diff.viewer.panel.scroll_viewport(-(scroll_lines)),
                     Pane::Diff => self.local_diff.viewer.scroll_viewport(-scroll_lines),
                 }
             }
@@ -351,7 +352,7 @@ impl App {
                 let pane = self.local_diff.pane_at_column(mouse.column);
                 match pane {
                     Pane::Tree => self.local_diff.viewer.scroll_viewport(scroll_lines),
-                    Pane::Panel => self.local_diff.viewer.panel.scroll_down(scroll_lines as usize),
+                    Pane::Panel => self.local_diff.viewer.panel.scroll_viewport(scroll_lines),
                     Pane::Diff => self.local_diff.viewer.scroll_viewport(scroll_lines),
                 }
             }

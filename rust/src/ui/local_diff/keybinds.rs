@@ -2,6 +2,7 @@ use std::sync::Arc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::agent::AgentRunner;
+use crate::ui::picker::{Picker, PickerItem};
 use crate::ui::scroll::Scrollable;
 use super::LocalDiff;
 
@@ -14,6 +15,18 @@ pub async fn handle_key(
     // Composing mode: route all keys to the input buffer
     if local_diff.composing.is_active() {
         handle_composing_key(local_diff, key, agent).await;
+        return;
+    }
+
+    // Search input mode: route keys to search query
+    if local_diff.viewer.search.active {
+        handle_search_key(local_diff, key);
+        return;
+    }
+
+    // Picker mode: route keys to picker
+    if local_diff.picker.is_some() {
+        handle_picker_key(local_diff, key).await;
         return;
     }
 
@@ -59,7 +72,7 @@ pub async fn handle_key(
         // Navigation within focused pane
         KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down if !ctrl => {
             if local_diff.viewer.panel_focused {
-                local_diff.viewer.panel.scroll_down(1);
+                local_diff.viewer.panel.scroll_viewport(1);
             } else if local_diff.viewer.file_list.focused {
                 move_tree_cursor(local_diff, 1);
             } else {
@@ -76,7 +89,7 @@ pub async fn handle_key(
         }
         KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up if !ctrl => {
             if local_diff.viewer.panel_focused {
-                local_diff.viewer.panel.scroll_up(1);
+                local_diff.viewer.panel.scroll_viewport(-1);
             } else if local_diff.viewer.file_list.focused {
                 move_tree_cursor(local_diff, -1);
             } else {
@@ -138,8 +151,8 @@ pub async fn handle_key(
         // Half-page scroll — respects focused pane
         KeyCode::Char('d') if ctrl => {
             if local_diff.viewer.panel_focused {
-                let half = local_diff.viewer.viewport_height() as usize / 2;
-                local_diff.viewer.panel.scroll_down(half);
+                let half = local_diff.viewer.viewport_height() as i32 / 2;
+                local_diff.viewer.panel.scroll_viewport(half);
             } else if local_diff.viewer.file_list.focused {
                 let half = local_diff.viewer.viewport_height() as usize / 2;
                 move_tree_cursor_n(local_diff, half as i32);
@@ -149,8 +162,8 @@ pub async fn handle_key(
         }
         KeyCode::Char('u') if ctrl => {
             if local_diff.viewer.panel_focused {
-                let half = local_diff.viewer.viewport_height() as usize / 2;
-                local_diff.viewer.panel.scroll_up(half);
+                let half = local_diff.viewer.viewport_height() as i32 / 2;
+                local_diff.viewer.panel.scroll_viewport(-half);
             } else if local_diff.viewer.file_list.focused {
                 let half = local_diff.viewer.viewport_height() as usize / 2;
                 move_tree_cursor_n(local_diff, -(half as i32));
@@ -215,16 +228,20 @@ pub async fn handle_key(
 
         // Search
         KeyCode::Char('/') => {
-            local_diff.viewer.search.active = true;
+            let cursor = local_diff.viewer.scroll.cursor;
+            let offset = local_diff.viewer.scroll.offset;
+            local_diff.viewer.search.start(cursor, offset);
         }
         KeyCode::Char('n') if !ctrl => {
-            if let Some(line) = local_diff.viewer.search.next_match() {
+            let cursor = local_diff.viewer.scroll.cursor;
+            if let Some(line) = local_diff.viewer.search.next_match(cursor) {
                 local_diff.viewer.scroll.cursor = line;
                 local_diff.viewer.scroll_down(0);
             }
         }
         KeyCode::Char('N') => {
-            if let Some(line) = local_diff.viewer.search.prev_match() {
+            let cursor = local_diff.viewer.scroll.cursor;
+            if let Some(line) = local_diff.viewer.search.prev_match(cursor) {
                 local_diff.viewer.scroll.cursor = line;
                 local_diff.viewer.scroll_up(0);
             }
@@ -279,12 +296,149 @@ pub async fn handle_key(
             if let Some(root_id) = local_diff.viewer.panel.thread_key.clone() {
                 let new_resolved = !local_diff.viewer.panel.resolved;
                 let _ = local_diff.comment_store.resolve(&root_id, new_resolved);
-                local_diff.viewer.panel.resolved = new_resolved;
+                local_diff.viewer.panel.close();
+                local_diff.viewer.panel_focused = false;
                 let filename = local_diff.current_filename();
                 local_diff.place_file_comments(&filename);
             }
         }
 
+        // File picker (Ctrl+P)
+        KeyCode::Char('p') if ctrl => {
+            let items: Vec<PickerItem> = local_diff.viewer.file_list.files.iter()
+                .map(|f| PickerItem {
+                    label: f.filename.clone(),
+                    description: format!("+{} -{}", f.additions, f.deletions),
+                    value: f.filename.clone(),
+                })
+                .collect();
+            local_diff.picker = Some(Picker::new("Files", items));
+            local_diff.picker_kind = "file".to_string();
+        }
+
+        // Help picker (?)
+        KeyCode::Char('?') if !ctrl => {
+            let items = vec![
+                PickerItem { label: "j/k".into(), description: "Move cursor up/down".into(), value: String::new() },
+                PickerItem { label: "h/l".into(), description: "Focus tree/diff/panel".into(), value: String::new() },
+                PickerItem { label: "Ctrl+d/u".into(), description: "Half-page down/up".into(), value: String::new() },
+                PickerItem { label: "gg/G".into(), description: "Go to top/bottom".into(), value: String::new() },
+                PickerItem { label: "/".into(), description: "Search in file".into(), value: String::new() },
+                PickerItem { label: "n/N".into(), description: "Next/prev search match".into(), value: String::new() },
+                PickerItem { label: "Ctrl+p".into(), description: "File picker".into(), value: String::new() },
+                PickerItem { label: "s/u".into(), description: "Stage/unstage line".into(), value: String::new() },
+                PickerItem { label: "c".into(), description: "Ask Copilot about hunk".into(), value: String::new() },
+                PickerItem { label: "r".into(), description: "Reply to comment".into(), value: String::new() },
+                PickerItem { label: "x".into(), description: "Resolve/unresolve thread".into(), value: String::new() },
+                PickerItem { label: "Enter".into(), description: "Open comment thread".into(), value: String::new() },
+                PickerItem { label: "1-4".into(), description: "Switch diff mode".into(), value: String::new() },
+                PickerItem { label: "?".into(), description: "Show this help".into(), value: String::new() },
+                PickerItem { label: "q".into(), description: "Quit".into(), value: String::new() },
+            ];
+            local_diff.picker = Some(Picker::new("Help", items));
+            local_diff.picker_kind = "help".to_string();
+        }
+
+        _ => {}
+    }
+}
+
+fn handle_search_key(local_diff: &mut LocalDiff, key: KeyEvent) {
+    use crate::ui::scroll::Scrollable;
+    match key.code {
+        KeyCode::Enter => {
+            local_diff.viewer.search.confirm();
+        }
+        KeyCode::Esc => {
+            // Restore cursor/offset to where `/` was pressed
+            let origin_cursor = local_diff.viewer.search.origin_cursor;
+            let origin_offset = local_diff.viewer.search.origin_offset;
+            local_diff.viewer.search.cancel();
+            local_diff.viewer.scroll.cursor = origin_cursor;
+            local_diff.viewer.scroll.offset = origin_offset;
+        }
+        KeyCode::Backspace => {
+            let mut q = local_diff.viewer.search.query.clone();
+            q.pop();
+            local_diff.viewer.search.set_query(&q, &local_diff.viewer.render_list);
+            // Incsearch: re-search from origin
+            incsearch_jump(local_diff);
+        }
+        KeyCode::Char(c) => {
+            let mut q = local_diff.viewer.search.query.clone();
+            q.push(c);
+            local_diff.viewer.search.set_query(&q, &local_diff.viewer.render_list);
+            // Incsearch: search from origin
+            incsearch_jump(local_diff);
+        }
+        _ => {}
+    }
+}
+
+/// Jump to the first match at or after the search origin cursor.
+fn incsearch_jump(local_diff: &mut LocalDiff) {
+    use crate::ui::scroll::Scrollable;
+    let origin = local_diff.viewer.search.origin_cursor;
+    if let Some(line) = local_diff.viewer.search.next_match_inclusive(origin) {
+        local_diff.viewer.scroll.cursor = line;
+        local_diff.viewer.scroll_down(0);
+    }
+}
+
+async fn handle_picker_key(local_diff: &mut LocalDiff, key: KeyEvent) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Esc => {
+            local_diff.picker = None;
+        }
+        KeyCode::Enter => {
+            let selected = local_diff.picker.as_ref().and_then(|p| p.selected().cloned());
+            let kind = local_diff.picker_kind.clone();
+            local_diff.picker = None;
+
+            if let Some(item) = selected {
+                match kind.as_str() {
+                    "file" => {
+                        // Jump to the selected file
+                        if let Some(idx) = local_diff.viewer.file_list.files.iter()
+                            .position(|f| f.filename == item.value)
+                        {
+                            local_diff.viewer.file_list.current_file_idx = idx;
+                            local_diff.viewer.scroll.cursor = 0;
+                            local_diff.viewer.scroll.offset = 0;
+                            local_diff.refresh_current_file().await;
+                            // Sync file list cursor to match
+                            if let Some(entry_idx) = local_diff.viewer.file_list.entries.iter()
+                                .position(|e| !e.is_dir && e.file_index as usize == idx)
+                            {
+                                local_diff.viewer.file_list.set_cursor(entry_idx);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') if ctrl || key.code == KeyCode::Up => {
+            if let Some(p) = &mut local_diff.picker {
+                p.move_up();
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') if ctrl || key.code == KeyCode::Down => {
+            if let Some(p) = &mut local_diff.picker {
+                p.move_down();
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(p) = &mut local_diff.picker {
+                p.pop_char();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(p) = &mut local_diff.picker {
+                p.push_char(c);
+            }
+        }
         _ => {}
     }
 }
@@ -479,7 +633,7 @@ async fn handle_composing_key(
     match key.code {
         KeyCode::Esc => {
             local_diff.composing.cancel();
-            local_diff.viewer.panel.close();
+            // Keep the panel open — just cancel the reply input
         }
         KeyCode::Enter => {
             if key.modifiers.contains(KeyModifiers::SHIFT)

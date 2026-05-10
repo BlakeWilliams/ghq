@@ -1,10 +1,14 @@
+use std::collections::{HashMap, HashSet};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
 
 use crate::ui::components::file_tree::{self, FileTreeEntry};
 use crate::ui::scroll::ScrollState;
 use crate::ui::styles::DiffColors;
 use crate::github::types::PullRequestFile;
+
+const ICON_COMMENT: &str = "\u{f0188}"; // 󰆈 nf-md-comment_text_outline
 
 /// Marker returned by `set_files` indicating the diff cursor should be reset.
 pub struct ResetCursor;
@@ -17,7 +21,6 @@ pub enum UpdateResult {
 }
 
 fn spans_width(spans: &[Span]) -> usize {
-    use unicode_width::UnicodeWidthStr;
     spans
         .iter()
         .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
@@ -140,7 +143,9 @@ impl FileList {
         _tree_h: usize,
         tree_w: usize,
         colors: &DiffColors,
-        comment_counts: &std::collections::HashMap<String, usize>,
+        comment_counts: &HashMap<String, usize>,
+        copilot_working: &HashSet<String>,
+        dots_frame: &str,
     ) -> Line<'static> {
         let inner_w = tree_w.saturating_sub(1);
         let sep = Span::styled("│", Style::default().fg(colors.chrome_fg));
@@ -218,21 +223,27 @@ impl FileList {
             }
         }
 
-        let badge = if !entry.is_dir {
+        // Right-aligned badge: comment count or copilot spinner
+        let (badge_text, badge_color) = if !entry.is_dir {
             if let Some(f) = self.files.get(entry.file_index as usize) {
-                comment_counts.get(&f.filename).copied().filter(|&n| n > 0)
+                let is_working = copilot_working.contains(&f.filename);
+                let count = comment_counts.get(&f.filename).copied().unwrap_or(0);
+
+                if is_working {
+                    (Some(dots_frame.to_string()), Color::Magenta)
+                } else if count > 0 {
+                    (Some(format!("{ICON_COMMENT} {count}")), Color::Yellow)
+                } else {
+                    (None, Color::Reset)
+                }
             } else {
-                None
+                (None, Color::Reset)
             }
         } else {
-            None
+            (None, Color::Reset)
         };
-        let badge_text = badge.map(|n| format!("●{n}"));
-        let badge_w = badge_text.as_ref().map_or(0, |t| {
-            use unicode_width::UnicodeWidthStr;
-            UnicodeWidthStr::width(t.as_str())
-        });
 
+        let badge_w = badge_text.as_ref().map_or(0, |t| UnicodeWidthStr::width(t.as_str()));
         let text_w = spans_width(&spans);
         let total_content = text_w + badge_w;
         let pad = inner_w.saturating_sub(total_content);
@@ -240,10 +251,127 @@ impl FileList {
             spans.push(Span::raw(" ".repeat(pad)));
         }
         if let Some(text) = badge_text {
-            spans.push(Span::styled(text, Style::default().fg(Color::Cyan)));
+            spans.push(Span::styled(text, Style::default().fg(badge_color)));
         }
         spans.push(sep);
 
         Line::from(spans)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::styles::DiffColors;
+
+    fn make_file(name: &str, status: &str, add: i32, del: i32) -> PullRequestFile {
+        PullRequestFile {
+            filename: name.to_string(),
+            status: status.to_string(),
+            additions: add,
+            deletions: del,
+            patch: String::new(),
+            previous_filename: String::new(),
+        }
+    }
+
+    fn make_list(files: Vec<PullRequestFile>) -> FileList {
+        let mut list = FileList::new();
+        list.set_files(files.clone());
+        list
+    }
+
+    fn extract_text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn badge_shows_comment_count() {
+        let files = vec![make_file("main.rs", "modified", 5, 2)];
+        let list = make_list(files);
+        let colors = DiffColors::default();
+        let mut counts = HashMap::new();
+        counts.insert("main.rs".to_string(), 3);
+        let working = HashSet::new();
+
+        let line = list.render_row(0, 20, 35, &colors, &counts, &working, "⠋");
+        let text = extract_text(&line);
+        assert!(text.contains('\u{f0188}'), "should have comment icon, got: {text}");
+        assert!(text.contains('3'), "should show count 3");
+    }
+
+    #[test]
+    fn badge_shows_spinner_when_copilot_working() {
+        let files = vec![make_file("lib.rs", "modified", 1, 0)];
+        let list = make_list(files);
+        let colors = DiffColors::default();
+        let counts = HashMap::new();
+        let mut working = HashSet::new();
+        working.insert("lib.rs".to_string());
+
+        let line = list.render_row(0, 20, 35, &colors, &counts, &working, "⠹");
+        let text = extract_text(&line);
+        assert!(text.contains('⠹'), "should show spinner frame, got: {text}");
+    }
+
+    #[test]
+    fn no_badge_when_no_comments_or_copilot() {
+        let files = vec![make_file("README.md", "modified", 1, 0)];
+        let list = make_list(files);
+        let colors = DiffColors::default();
+        let counts = HashMap::new();
+        let working = HashSet::new();
+
+        let line = list.render_row(0, 20, 35, &colors, &counts, &working, "⠋");
+        let text = extract_text(&line);
+        assert!(!text.contains('\u{f0188}'), "should not have comment icon");
+    }
+
+    #[test]
+    fn copilot_working_overrides_comment_count() {
+        let files = vec![make_file("app.rs", "modified", 1, 0)];
+        let list = make_list(files);
+        let colors = DiffColors::default();
+        let mut counts = HashMap::new();
+        counts.insert("app.rs".to_string(), 5);
+        let mut working = HashSet::new();
+        working.insert("app.rs".to_string());
+
+        let line = list.render_row(0, 20, 35, &colors, &counts, &working, "⠸");
+        let text = extract_text(&line);
+        assert!(text.contains('⠸'), "spinner should show when copilot working");
+        assert!(!text.contains('\u{f0188}'), "comment icon hidden when working");
+    }
+
+    #[test]
+    fn badge_color_is_yellow_for_comments() {
+        let files = vec![make_file("test.rs", "added", 10, 0)];
+        let list = make_list(files);
+        let colors = DiffColors::default();
+        let mut counts = HashMap::new();
+        counts.insert("test.rs".to_string(), 2);
+        let working = HashSet::new();
+
+        let line = list.render_row(0, 20, 35, &colors, &counts, &working, "⠋");
+        let badge_span = line.spans.iter().find(|s| s.content.contains('\u{f0188}'));
+        assert!(badge_span.is_some(), "should have badge span");
+        let style = badge_span.unwrap().style;
+        assert_eq!(style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn badge_color_is_magenta_for_copilot() {
+        let files = vec![make_file("test.rs", "added", 10, 0)];
+        let list = make_list(files);
+        let colors = DiffColors::default();
+        let counts = HashMap::new();
+        let mut working = HashSet::new();
+        working.insert("test.rs".to_string());
+
+        let line = list.render_row(0, 20, 35, &colors, &counts, &working, "⠙");
+        let badge_span = line.spans.iter().find(|s| s.content.contains('⠙'));
+        assert!(badge_span.is_some(), "should have spinner span");
+        let style = badge_span.unwrap().style;
+        assert_eq!(style.fg, Some(Color::Magenta));
     }
 }

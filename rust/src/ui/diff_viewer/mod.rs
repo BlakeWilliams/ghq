@@ -9,6 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
+use regex::Regex;
 use unicode_width::UnicodeWidthStr;
 
 use self::file_list::FileList;
@@ -33,6 +34,7 @@ pub struct LayoutInfo {
     pub deletions: i32,
     pub help_line: Vec<(String, String)>,
     pub comment_counts: std::collections::HashMap<String, usize>,
+    pub copilot_working_files: std::collections::HashSet<String>,
 }
 
 pub struct DiffViewer {
@@ -236,6 +238,9 @@ impl DiffViewer {
 
         // Apply cached highlights immediately if available
         self.highlights.apply_cached(&mut self.render_list, filename);
+
+        // Re-run search against the new file's content
+        self.search.run_search(&self.render_list);
     }
 
     pub fn apply_highlights(
@@ -397,7 +402,9 @@ impl DiffViewer {
         let (panel_thumb_start, panel_thumb_len) = if self.panel.visible && panel_total_lines > 0 {
             self.panel.scroll.set_viewport_height(vp_h);
             self.panel.scroll.set_total(panel_total_lines);
-            self.panel.scroll.clamp();
+            // Panel is offset-only (no cursor). Keep cursor pinned to offset
+            // so clamp() doesn't fight with cursor-based logic.
+            self.panel.scroll.cursor = self.panel.scroll.offset;
             self.panel.scroll.scrollbar()
         } else {
             (-1, 0)
@@ -413,7 +420,8 @@ impl DiffViewer {
         // Render content rows
         for row in 0..vp_h {
             // Tree
-            let tree_line = self.file_list.render_row(row, vp_h, tree_area.width as usize, colors, &info.comment_counts);
+            let spinner_frame = BADGE_SPIN_FRAMES[self.dots_frame % BADGE_SPIN_FRAMES.len()];
+            let tree_line = self.file_list.render_row(row, vp_h, tree_area.width as usize, colors, &info.comment_counts, &info.copilot_working_files, spinner_frame);
             frame.render_widget(
                 Paragraph::new(tree_line),
                 Rect::new(tree_area.x, tree_area.y + row as u16, tree_area.width, 1),
@@ -529,6 +537,22 @@ impl DiffViewer {
 
         // Render footer
         self.render_footer(frame, footer_area, colors, info, tree_w as usize);
+
+        // Search popup overlay (only while typing)
+        if self.search.active {
+            use super::popup::{Popup, PopupPosition, search_popup_lines};
+            let popup_lines = search_popup_lines(
+                &self.search.query,
+                self.search.active,
+                self.search.match_count(),
+                self.search.match_idx,
+            );
+            Popup::new("Search")
+                .lines(popup_lines)
+                .position(PopupPosition::TopThird)
+                .border_color(colors.border_fg)
+                .render(frame, area);
+        }
     }
 
     fn render_header(
@@ -889,6 +913,19 @@ impl DiffViewer {
             spans.push(Span::styled(" ".repeat(pad), bg_style));
         }
 
+        // Apply search match highlighting
+        if self.search.is_match(idx) {
+            let is_current = self.search.is_current_match(idx);
+            let search_bg = if is_current {
+                colors.search_current_bg
+            } else {
+                colors.search_match_bg
+            };
+            if let Some(re) = &self.search.pattern {
+                spans = highlight_search_in_spans(spans, &dl.content, re, search_bg, col_w);
+            }
+        }
+
         // Overlay comment badge pill on the right edge
         if let Some(badge) = &dl.badge {
             overlay_badge(&mut spans, badge, bg, width, &self.dots_frame);
@@ -998,4 +1035,85 @@ impl DiffViewer {
 
         Line::from(spans)
     }
+}
+
+/// Highlight search matches in the content portion of diff line spans.
+/// `gutter_cols` is the number of leading spans to skip (gutter + marker).
+fn highlight_search_in_spans(
+    spans: Vec<Span<'static>>,
+    content: &str,
+    re: &Regex,
+    hl_bg: Color,
+    gutter_width: usize,
+) -> Vec<Span<'static>> {
+    // The gutter region = old_num + space + new_num + space + marker = gutter_width*2 + 3
+    // But it's simpler to just find which spans contain content and split those.
+    // Strategy: rebuild the span list, splitting any span whose text overlaps a match.
+
+    // First, collect all match byte ranges in the content
+    let matches: Vec<(usize, usize)> = re.find_iter(content).map(|m| (m.start(), m.end())).collect();
+    if matches.is_empty() {
+        return spans;
+    }
+
+    // Determine gutter span count: gutter_width*2 + 3 character columns before content
+    let gutter_cols_total = gutter_width * 2 + 3;
+    let mut result = Vec::with_capacity(spans.len() + matches.len() * 2);
+    let mut char_offset: usize = 0; // character position in the full rendered line
+
+    for span in spans {
+        let span_w = UnicodeWidthStr::width(span.content.as_ref());
+        let span_start = char_offset;
+        let span_end = char_offset + span_w;
+        char_offset = span_end;
+
+        // If this span is entirely in the gutter region, pass through
+        if span_end <= gutter_cols_total {
+            result.push(span);
+            continue;
+        }
+
+        // For content spans, compute offset into `content` string
+        let content_start = span_start.saturating_sub(gutter_cols_total);
+        let content_end = span_end.saturating_sub(gutter_cols_total);
+
+        // Find matches that overlap this span's content range
+        let overlapping: Vec<(usize, usize)> = matches
+            .iter()
+            .filter(|(ms, me)| *ms < content_end && *me > content_start)
+            .map(|(ms, me)| {
+                let s = ms.saturating_sub(content_start);
+                let e = (*me - content_start).min(content_end - content_start);
+                (s, e)
+            })
+            .collect();
+
+        if overlapping.is_empty() {
+            result.push(span);
+            continue;
+        }
+
+        // Split the span text at match boundaries
+        let text = span.content.to_string();
+        let base_style = span.style;
+        let hl_style = Style::default().fg(Color::Black).bg(hl_bg);
+        let chars: Vec<char> = text.chars().collect();
+        let mut pos = 0usize;
+
+        for (ms, me) in &overlapping {
+            if *ms > pos {
+                let before: String = chars[pos..*ms].iter().collect();
+                result.push(Span::styled(before, base_style));
+            }
+            let matched: String = chars[*ms..*me].iter().collect();
+            result.push(Span::styled(matched, hl_style));
+            pos = *me;
+        }
+        if pos < chars.len() {
+            let after: String = chars[pos..].iter().collect();
+            result.push(Span::styled(after, base_style));
+        }
+    }
+
+    result
 }

@@ -16,6 +16,7 @@ use super::composing_state::ComposingState;
 use super::copilot_state::{CopilotState, CompletedReply, ToolCall, ToolGroup, ToolStatus};
 use super::diff_viewer::{DiffLineData, DiffViewer, LayoutInfo, LineType, TREE_WIDTH};
 use super::diff_viewer::panel::{self, PanelComment};
+use super::picker::{Picker, PickerItem};
 use super::scroll::Scrollable;
 use super::styles::DiffColors;
 
@@ -58,6 +59,8 @@ pub struct LocalDiff {
     pub highlight_tx: mpsc::UnboundedSender<HighlightResult>,
     pub highlight_rx: mpsc::UnboundedReceiver<HighlightResult>,
     pub colors: DiffColors,
+    pub picker: Option<Picker>,
+    pub picker_kind: String,
 }
 
 impl LocalDiff {
@@ -77,6 +80,8 @@ impl LocalDiff {
             highlight_tx,
             highlight_rx,
             colors: DiffColors::default(),
+            picker: None,
+            picker_kind: String::new(),
         }
     }
 
@@ -148,6 +153,12 @@ impl LocalDiff {
         if self.viewer.file_list.files.is_empty() {
             self.viewer.set_diff_lines(Vec::new(), "");
             return;
+        }
+
+        // Close the comment panel when switching files
+        if self.viewer.panel.visible {
+            self.viewer.panel.close();
+            self.viewer.panel_focused = false;
         }
 
         let idx = self.viewer.file_list.current_file_idx.min(self.viewer.file_list.files.len() - 1);
@@ -676,6 +687,7 @@ impl LocalDiff {
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect, colors: &DiffColors) {
         let file = self.viewer.file_list.files.get(self.viewer.file_list.current_file_idx);
+        let copilot_working_files = self.copilot_state.pending_file_set();
         let info = LayoutInfo {
             mode: self.mode,
             branch_name: self.base_branch.clone(),
@@ -686,6 +698,7 @@ impl LocalDiff {
             deletions: file.map(|f| f.deletions).unwrap_or(0),
             help_line: self.build_help_line(),
             comment_counts: self.comment_store.thread_counts_by_file(),
+            copilot_working_files,
         };
 
         // Show composing input in the panel reply area
@@ -709,6 +722,44 @@ impl LocalDiff {
         }
 
         self.viewer.render_layout(frame, area, colors, &info);
+
+        // Picker popup overlay (rendered on top of everything)
+        if let Some(picker) = &self.picker {
+            use super::popup::{Popup, PopupPosition, picker_popup_lines};
+            let max_visible = 10usize;
+            let start = if picker.cursor >= max_visible {
+                picker.cursor - max_visible + 1
+            } else {
+                0
+            };
+            let end = (start + max_visible).min(picker.filtered.len());
+
+            let items: Vec<(String, String, Vec<usize>, bool)> = (start..end)
+                .map(|i| {
+                    let fi = &picker.filtered[i];
+                    let item = &picker.items[fi.index];
+                    (
+                        item.label.clone(),
+                        item.description.clone(),
+                        fi.match_positions.clone(),
+                        i == picker.cursor,
+                    )
+                })
+                .collect();
+
+            let lines = picker_popup_lines(
+                &picker.query,
+                &items,
+                picker.items.len(),
+                picker.filtered.len(),
+            );
+
+            Popup::new(&picker.title)
+                .lines(lines)
+                .position(PopupPosition::TopThird)
+                .border_color(colors.border_fg)
+                .render(frame, area);
+        }
     }
 
     fn build_help_line(&self) -> Vec<(String, String)> {

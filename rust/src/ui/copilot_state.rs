@@ -172,6 +172,10 @@ impl CopilotState {
             .collect()
     }
 
+    pub fn pending_file_set(&self) -> std::collections::HashSet<String> {
+        self.pending.values().map(|p| p.path.clone()).collect()
+    }
+
     pub fn handle_event(&mut self, event: AgentEvent) -> Option<CompletedReply> {
         match event.kind {
             EventKind::Delta => {

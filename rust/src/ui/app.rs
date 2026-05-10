@@ -114,11 +114,17 @@ impl App {
         }
 
         enable_raw_mode()?;
+
+        // Drain any stale OSC palette responses that arrived after the
+        // initial query. Some terminals defer delivery until focus returns.
+        crate::terminal::palette::drain_stdin();
+
         let mut stdout = io::stdout();
         execute!(
             stdout,
             EnterAlternateScreen,
             crossterm::event::EnableMouseCapture,
+            crossterm::event::EnableFocusChange,
             crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
             cursor::Hide
         )?;
@@ -173,6 +179,7 @@ impl App {
         execute!(
             terminal.backend_mut(),
             crossterm::event::DisableMouseCapture,
+            crossterm::event::DisableFocusChange,
             LeaveAlternateScreen,
             cursor::Show
         )?;
@@ -303,6 +310,11 @@ impl App {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
                 self.local_diff.resize(w, h);
+            }
+            Event::FocusGained => {
+                // Drain stale OSC palette responses that terminals may defer
+                // until the window regains focus.
+                crate::terminal::palette::drain_stdin();
             }
             _ => {}
         }

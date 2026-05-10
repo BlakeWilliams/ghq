@@ -104,6 +104,36 @@ pub fn query_terminal_colors() -> Palette {
     palette
 }
 
+/// Non-blocking drain of any pending bytes on stdin.
+/// Call after palette queries to discard late-arriving OSC responses
+/// that would otherwise leak into the event loop as garbage key input.
+#[cfg(unix)]
+pub fn drain_stdin() {
+    use std::os::unix::io::AsRawFd;
+    let fd = std::io::stdin().as_raw_fd();
+    let mut tmp = [0u8; 1024];
+
+    // Keep reading while data is immediately available (poll with 0ms timeout)
+    loop {
+        let mut fds = [libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        let ret = unsafe { libc::poll(fds.as_mut_ptr(), 1, 0) };
+        if ret <= 0 {
+            break;
+        }
+        let n = unsafe { libc::read(fd, tmp.as_mut_ptr() as *mut libc::c_void, tmp.len()) };
+        if n <= 0 {
+            break;
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub fn drain_stdin() {}
+
 #[cfg(unix)]
 fn query_terminal_colors_unix(palette: &mut Palette) {
     use std::io::Write;
@@ -178,6 +208,11 @@ fn query_terminal_colors_unix(palette: &mut Palette) {
     }
 
     let _ = crossterm::terminal::disable_raw_mode();
+
+    // Drain any late-arriving OSC responses from stdin so they don't leak
+    // into crossterm's event stream later. Some terminals (especially macOS)
+    // defer response delivery until the window regains focus.
+    drain_stdin();
 
     let raw = String::from_utf8_lossy(&buf);
     if in_tmux {

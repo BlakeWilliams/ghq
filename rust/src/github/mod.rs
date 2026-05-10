@@ -1,0 +1,232 @@
+pub use cached::CachedClient;
+pub mod cached;
+pub mod types;
+
+use anyhow::{Context, Result};
+
+pub struct Client {
+    octocrab: octocrab::Octocrab,
+}
+
+impl Client {
+    pub fn new() -> Result<Self> {
+        let token = Self::resolve_token().context("no GitHub token found")?;
+        let octocrab = octocrab::Octocrab::builder()
+            .personal_token(token)
+            .build()
+            .context("failed to build octocrab client")?;
+        Ok(Self { octocrab })
+    }
+
+    fn resolve_token() -> Option<String> {
+        if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+            return Some(token);
+        }
+        if let Ok(token) = std::env::var("GH_TOKEN") {
+            return Some(token);
+        }
+        // Try gh auth token
+        std::process::Command::new("gh")
+            .args(["auth", "token"])
+            .output()
+            .ok()
+            .and_then(|o| {
+                if o.status.success() {
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                } else {
+                    None
+                }
+            })
+    }
+
+    pub async fn authenticated_user(&self) -> Result<types::User> {
+        let user: types::User = self
+            .octocrab
+            .get("/user", None::<&()>)
+            .await
+            .context("failed to fetch authenticated user")?;
+        Ok(user)
+    }
+
+    pub async fn pull_requests(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Vec<types::PullRequest>> {
+        let prs: Vec<types::PullRequest> = self
+            .octocrab
+            .get(
+                format!("/repos/{owner}/{repo}/pulls"),
+                Some(&[("state", "open"), ("per_page", "100")]),
+            )
+            .await
+            .context("failed to fetch pull requests")?;
+        Ok(prs)
+    }
+
+    pub async fn pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<types::PullRequest> {
+        let pr: types::PullRequest = self
+            .octocrab
+            .get(
+                format!("/repos/{owner}/{repo}/pulls/{number}"),
+                None::<&()>,
+            )
+            .await
+            .context("failed to fetch pull request")?;
+        Ok(pr)
+    }
+
+    pub async fn pull_request_by_branch(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+    ) -> Result<Option<types::PullRequest>> {
+        let prs: Vec<types::PullRequest> = self
+            .octocrab
+            .get(
+                format!("/repos/{owner}/{repo}/pulls"),
+                Some(&[("head", &format!("{owner}:{branch}")), ("state", &"open".to_string())]),
+            )
+            .await
+            .context("failed to search PRs by branch")?;
+        Ok(prs.into_iter().next())
+    }
+
+    pub async fn reviews(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Vec<types::Review>> {
+        let reviews: Vec<types::Review> = self
+            .octocrab
+            .get(
+                format!("/repos/{owner}/{repo}/pulls/{number}/reviews"),
+                None::<&()>,
+            )
+            .await
+            .context("failed to fetch reviews")?;
+        Ok(reviews)
+    }
+
+    pub async fn review_comments(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Vec<types::ReviewComment>> {
+        let comments: Vec<types::ReviewComment> = self
+            .octocrab
+            .get(
+                format!("/repos/{owner}/{repo}/pulls/{number}/comments"),
+                Some(&[("per_page", "100")]),
+            )
+            .await
+            .context("failed to fetch review comments")?;
+        Ok(comments)
+    }
+
+    pub async fn issue_comments(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Vec<types::IssueComment>> {
+        let comments: Vec<types::IssueComment> = self
+            .octocrab
+            .get(
+                format!("/repos/{owner}/{repo}/issues/{number}/comments"),
+                Some(&[("per_page", "100")]),
+            )
+            .await
+            .context("failed to fetch issue comments")?;
+        Ok(comments)
+    }
+
+    pub async fn pr_files(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Vec<types::PullRequestFile>> {
+        let files: Vec<types::PullRequestFile> = self
+            .octocrab
+            .get(
+                format!("/repos/{owner}/{repo}/pulls/{number}/files"),
+                Some(&[("per_page", "100")]),
+            )
+            .await
+            .context("failed to fetch PR files")?;
+        Ok(files)
+    }
+
+    pub async fn check_runs(
+        &self,
+        owner: &str,
+        repo: &str,
+        git_ref: &str,
+    ) -> Result<types::CheckRunsResponse> {
+        let resp: types::CheckRunsResponse = self
+            .octocrab
+            .get(
+                format!("/repos/{owner}/{repo}/commits/{git_ref}/check-runs"),
+                None::<&()>,
+            )
+            .await
+            .context("failed to fetch check runs")?;
+        Ok(resp)
+    }
+
+    pub async fn create_review_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        body: &str,
+        commit_id: &str,
+        path: &str,
+        line: i32,
+        side: &str,
+    ) -> Result<types::ReviewComment> {
+        let comment: types::ReviewComment = self
+            .octocrab
+            .post(
+                format!("/repos/{owner}/{repo}/pulls/{number}/comments"),
+                Some(&serde_json::json!({
+                    "body": body,
+                    "commit_id": commit_id,
+                    "path": path,
+                    "line": line,
+                    "side": side,
+                })),
+            )
+            .await
+            .context("failed to create review comment")?;
+        Ok(comment)
+    }
+
+    pub async fn reply_to_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<types::ReviewComment> {
+        let comment: types::ReviewComment = self
+            .octocrab
+            .post(
+                format!("/repos/{owner}/{repo}/pulls/{number}/comments/{comment_id}/replies"),
+                Some(&serde_json::json!({ "body": body })),
+            )
+            .await
+            .context("failed to reply to comment")?;
+        Ok(comment)
+    }
+}

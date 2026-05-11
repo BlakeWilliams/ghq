@@ -23,6 +23,13 @@ pub trait Scrollable {
     fn scroll_half_page_up(&mut self) {
         self.scroll_state_mut().half_page_up();
     }
+    fn scroll_full_page_down(&mut self) {
+        self.sync_scroll_total();
+        self.scroll_state_mut().full_page_down();
+    }
+    fn scroll_full_page_up(&mut self) {
+        self.scroll_state_mut().full_page_up();
+    }
     fn scroll_viewport(&mut self, delta: i32) {
         self.sync_scroll_total();
         self.scroll_state_mut().scroll_viewport(delta);
@@ -104,6 +111,20 @@ impl ScrollState {
         let half = (self.viewport_height / 2).max(1);
         self.cursor = self.cursor.saturating_sub(half);
         self.offset = self.offset.saturating_sub(half);
+    }
+
+    pub fn full_page_down(&mut self) {
+        let page = self.viewport_height.max(1);
+        let max_offset = self.total.saturating_sub(self.viewport_height);
+        let max_cursor = self.total.saturating_sub(1);
+        self.cursor = (self.cursor + page).min(max_cursor);
+        self.offset = (self.offset + page).min(max_offset);
+    }
+
+    pub fn full_page_up(&mut self) {
+        let page = self.viewport_height.max(1);
+        self.cursor = self.cursor.saturating_sub(page);
+        self.offset = self.offset.saturating_sub(page);
     }
 
     /// Scroll the viewport directly (mouse wheel). Cursor follows to stay visible.
@@ -188,6 +209,19 @@ impl ScrollState {
             self.offset = self.cursor;
         } else if self.cursor >= self.offset + self.viewport_height {
             self.offset = self.cursor - self.viewport_height + 1;
+        }
+    }
+
+    /// Re-center the viewport around the cursor.
+    pub fn sync_viewport_center(&mut self) {
+        if self.viewport_height == 0 || self.total == 0 {
+            return;
+        }
+        let half = self.viewport_height / 2;
+        self.offset = self.cursor.saturating_sub(half);
+        let max_offset = self.total.saturating_sub(self.viewport_height);
+        if self.offset > max_offset {
+            self.offset = max_offset;
         }
     }
 }

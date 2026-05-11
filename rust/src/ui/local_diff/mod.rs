@@ -17,7 +17,7 @@ use super::composing_state::ComposingState;
 use super::copilot_state::{CopilotState, CompletedReply, ToolCall, ToolGroup, ToolStatus};
 use super::diff_viewer::{DiffLineData, DiffViewer, LayoutInfo, LineType, TREE_WIDTH};
 use super::diff_viewer::panel::{self, PanelComment};
-use super::picker::{Picker, PickerItem};
+use super::picker::Picker;
 use super::scroll::Scrollable;
 use super::styles::DiffColors;
 
@@ -412,8 +412,8 @@ impl LocalDiff {
         keybinds::move_tree_cursor(self, 1);
     }
 
-    pub async fn handle_key(&mut self, key: KeyEvent, repo_root: &str, agent: &Arc<dyn AgentRunner>) {
-        keybinds::handle_key(self, key, repo_root, agent).await;
+    pub async fn handle_key(&mut self, key: KeyEvent, repo_root: &str, agent: &Arc<dyn AgentRunner>) -> Option<String> {
+        keybinds::handle_key(self, key, repo_root, agent).await
     }
 
     pub async fn next_file(&mut self) {

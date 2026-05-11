@@ -1,6 +1,5 @@
 pub mod app;
 pub mod chat;
-pub mod command_bar;
 pub mod components;
 pub mod composing_state;
 pub mod copilot_state;

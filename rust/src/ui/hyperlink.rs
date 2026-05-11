@@ -1,7 +1,6 @@
 use itertools::Itertools;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
 use ratatui::text::Text;
 use ratatui::widgets::Widget;
 

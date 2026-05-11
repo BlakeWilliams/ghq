@@ -54,6 +54,7 @@ pub struct DiffViewer {
     pub panel: panel::CommentPanel,
     pub dots_frame: usize,
     pub waiting_g: bool,
+    pub pending_bracket: Option<char>,
 }
 
 fn spans_width(spans: &[Span]) -> usize {
@@ -189,6 +190,7 @@ impl DiffViewer {
             panel: panel::CommentPanel::new(),
             dots_frame: 0,
             waiting_g: false,
+            pending_bracket: None,
         }
     }
 

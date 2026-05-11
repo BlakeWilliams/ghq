@@ -13,6 +13,8 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use tokio::sync::{Notify, mpsc};
+
+use super::local_diff::keybinds;
 use tokio::time::{Instant, MissedTickBehavior, interval, sleep};
 
 use crate::agent::AgentRunner;
@@ -391,10 +393,71 @@ impl App {
             return;
         }
 
+        // Open command palette with `:`
+        if key.code == KeyCode::Char(':')
+            && !self.local_diff.composing.is_active()
+            && self.local_diff.picker.is_none()
+            && !self.local_diff.viewer.search.active
+        {
+            keybinds::open_command_palette(&mut self.local_diff);
+            return;
+        }
+
         // Route to active view
         match self.active_view {
             ActiveView::LocalDiff => {
-                self.local_diff.handle_key(key, &self.repo_root, &self.agent).await;
+                if let Some(cmd) = self.local_diff.handle_key(key, &self.repo_root, &self.agent).await {
+                    self.handle_command(&cmd, &[]).await;
+                }
+            }
+        }
+    }
+
+    async fn handle_command(&mut self, name: &str, _args: &[String]) {
+        match name {
+            "quit" | "q" => {
+                self.should_quit = true;
+            }
+            "refresh" => {
+                self.local_diff.reload_diff();
+            }
+            "view-on-github" => {
+                if let Some(ref pr) = self.local_diff.pr {
+                    let url = if let Some(ref html_url) = pr.html_url {
+                        html_url.to_string()
+                    } else {
+                        format!(
+                            "https://github.com/{}/{}/pull/{}",
+                            self.owner, self.repo, pr.number
+                        )
+                    };
+                    let _ = open::that(&url);
+                } else {
+                    self.local_diff.flash.error("No PR found for current branch".to_string());
+                }
+            }
+            "set-merge-base" => {
+                let repo_root = self.repo_root.clone();
+                match crate::git::local_branches(&repo_root).await {
+                    Ok(branches) => {
+                        let items: Vec<super::picker::PickerItem> = branches
+                            .into_iter()
+                            .map(|b| super::picker::PickerItem {
+                                label: b.clone(),
+                                description: String::new(),
+                                value: b,
+                            })
+                            .collect();
+                        self.local_diff.picker = Some(super::picker::Picker::new("Merge Base", items));
+                        self.local_diff.picker_kind = "merge-base".to_string();
+                    }
+                    Err(e) => {
+                        self.local_diff.flash.error(format!("Failed to list branches: {e}"));
+                    }
+                }
+            }
+            _ => {
+                self.local_diff.flash.error("Unknown command: ".to_string() + name);
             }
         }
     }
@@ -423,9 +486,11 @@ impl App {
     }
 
     fn render(&mut self, frame: &mut ratatui::Frame) {
+        let area = frame.area();
+
         match self.active_view {
             ActiveView::LocalDiff => {
-                self.local_diff.render(frame, frame.area(), &self.diff_colors);
+                self.local_diff.render(frame, area, &self.diff_colors);
             }
         }
     }

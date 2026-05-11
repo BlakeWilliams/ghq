@@ -213,6 +213,45 @@ impl RenderList {
         })
     }
 
+    /// Find the render index of the next badge after `from`, wrapping around.
+    pub fn next_badge_idx(&self, from: usize) -> Option<usize> {
+        let len = self.items.len();
+        if len == 0 {
+            return None;
+        }
+        let mut first: Option<usize> = None;
+        for (i, item) in self.items.iter().enumerate() {
+            if let RenderItem::DiffLine(dl) = item {
+                if dl.badge.is_some() {
+                    if first.is_none() {
+                        first = Some(i);
+                    }
+                    if i > from {
+                        return Some(i);
+                    }
+                }
+            }
+        }
+        first // wrap around
+    }
+
+    /// Find the render index of the previous badge before `from`, wrapping around.
+    pub fn prev_badge_idx(&self, from: usize) -> Option<usize> {
+        let mut last: Option<usize> = None;
+        let mut candidate: Option<usize> = None;
+        for (i, item) in self.items.iter().enumerate() {
+            if let RenderItem::DiffLine(dl) = item {
+                if dl.badge.is_some() {
+                    last = Some(i);
+                    if i < from {
+                        candidate = Some(i);
+                    }
+                }
+            }
+        }
+        candidate.or(last) // wrap around
+    }
+
     pub fn gutter_width(&self) -> usize {
         self.cached_gutter_width
     }

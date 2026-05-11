@@ -2,6 +2,7 @@ use std::sync::Arc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::agent::AgentRunner;
+use crate::git::diff::DiffMode;
 use crate::ui::picker::{Picker, PickerItem};
 use crate::ui::scroll::Scrollable;
 use super::LocalDiff;
@@ -11,23 +12,22 @@ pub async fn handle_key(
     key: KeyEvent,
     repo_root: &str,
     agent: &Arc<dyn AgentRunner>,
-) {
+) -> Option<String> {
     // Composing mode: route all keys to the input buffer
     if local_diff.composing.is_active() {
         handle_composing_key(local_diff, key, agent).await;
-        return;
+        return None;
     }
 
     // Search input mode: route keys to search query
     if local_diff.viewer.search.active {
         handle_search_key(local_diff, key);
-        return;
+        return None;
     }
 
     // Picker mode: route keys to picker
     if local_diff.picker.is_some() {
-        handle_picker_key(local_diff, key).await;
-        return;
+        return handle_picker_key(local_diff, key).await;
     }
 
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -36,6 +36,33 @@ pub async fn handle_key(
     // Reset waiting_g on any key that isn't 'g'
     if key.code != KeyCode::Char('g') || ctrl {
         local_diff.viewer.waiting_g = false;
+    }
+
+    // Handle `]c` / `[c` chord for next/prev comment thread
+    if let Some(bracket) = local_diff.viewer.pending_bracket.take() {
+        if key.code == KeyCode::Char('c')
+            && !ctrl
+            && !local_diff.viewer.file_list.focused
+        {
+            let cursor = local_diff.viewer.scroll.cursor;
+            let target = if bracket == ']' {
+                local_diff.viewer.render_list.next_badge_idx(cursor)
+            } else {
+                local_diff.viewer.render_list.prev_badge_idx(cursor)
+            };
+            if let Some(idx) = target {
+                local_diff.viewer.selection_start = None;
+                local_diff.viewer.scroll.cursor = idx;
+                local_diff.viewer.scroll.sync_viewport_center();
+                if let Some(badge) = local_diff.viewer.render_list.badge_at(idx) {
+                    let thread_key = badge.thread_key.clone();
+                    local_diff.open_panel_for_thread(&thread_key);
+                    local_diff.viewer.panel_focused = true;
+                    local_diff.viewer.file_list.focused = false;
+                }
+            }
+        }
+        return None;
     }
 
     match key.code {
@@ -172,6 +199,30 @@ pub async fn handle_key(
             }
         }
 
+        // Full-page scroll
+        KeyCode::Char('f') if ctrl => {
+            if local_diff.viewer.panel_focused {
+                let page = local_diff.viewer.viewport_height() as i32;
+                local_diff.viewer.panel.scroll_viewport(page);
+            } else if local_diff.viewer.file_list.focused {
+                let page = local_diff.viewer.viewport_height() as i32;
+                move_tree_cursor_n(local_diff, page);
+            } else {
+                local_diff.viewer.scroll_full_page_down();
+            }
+        }
+        KeyCode::Char('b') if ctrl => {
+            if local_diff.viewer.panel_focused {
+                let page = local_diff.viewer.viewport_height() as i32;
+                local_diff.viewer.panel.scroll_viewport(-page);
+            } else if local_diff.viewer.file_list.focused {
+                let page = local_diff.viewer.viewport_height() as i32;
+                move_tree_cursor_n(local_diff, -page);
+            } else {
+                local_diff.viewer.scroll_full_page_up();
+            }
+        }
+
         // Top (gg — vim-style double tap)
         KeyCode::Char('g') if !ctrl => {
             if local_diff.viewer.waiting_g {
@@ -204,6 +255,14 @@ pub async fn handle_key(
             } else {
                 local_diff.viewer.goto_bottom();
             }
+        }
+
+        // Next/prev comment thread chord: `]c` / `[c`
+        KeyCode::Char(']') if !ctrl => {
+            local_diff.viewer.pending_bracket = Some(']');
+        }
+        KeyCode::Char('[') if !ctrl => {
+            local_diff.viewer.pending_bracket = Some('[');
         }
 
         // Mode cycling
@@ -347,35 +406,73 @@ pub async fn handle_key(
             local_diff.picker_kind = "file".to_string();
         }
 
-        // Help picker (?)
+        // Help (?)
         KeyCode::Char('?') if !ctrl => {
-            let items = vec![
-                PickerItem { label: "j/k".into(), description: "Move cursor up/down".into(), value: String::new() },
-                PickerItem { label: "h/l".into(), description: "Focus tree/diff/panel".into(), value: String::new() },
-                PickerItem { label: "Ctrl+d/u".into(), description: "Half-page down/up".into(), value: String::new() },
-                PickerItem { label: "gg/G".into(), description: "Go to top/bottom".into(), value: String::new() },
-                PickerItem { label: "/".into(), description: "Search in file".into(), value: String::new() },
-                PickerItem { label: "n/N".into(), description: "Next/prev search match".into(), value: String::new() },
-                PickerItem { label: "Ctrl+p".into(), description: "File picker".into(), value: String::new() },
-                PickerItem { label: "s/u".into(), description: "Stage/unstage line".into(), value: String::new() },
-                PickerItem { label: "c".into(), description: "Ask Copilot about hunk".into(), value: String::new() },
-                PickerItem { label: "r".into(), description: "Reply to comment".into(), value: String::new() },
-                PickerItem { label: "x".into(), description: "Resolve/unresolve thread".into(), value: String::new() },
-                PickerItem { label: "Enter".into(), description: "Open comment thread".into(), value: String::new() },
-                PickerItem { label: "1-4".into(), description: "Switch diff mode".into(), value: String::new() },
-                PickerItem { label: "?".into(), description: "Show this help".into(), value: String::new() },
-                PickerItem { label: "q".into(), description: "Quit".into(), value: String::new() },
-            ];
-            local_diff.picker = Some(Picker::new("Help", items));
-            local_diff.picker_kind = "help".to_string();
+            open_help_palette(local_diff);
         }
 
         _ => {}
     }
+    None
+}
+
+pub fn open_command_palette(local_diff: &mut LocalDiff) {
+    let cmd = |name: &str, desc: &str| PickerItem {
+        label: name.into(),
+        description: desc.into(),
+        value: format!("cmd:{name}"),
+    };
+
+    let items = vec![
+        cmd("refresh", "Reload diff from disk"),
+        cmd("view-on-github", "Open PR in browser"),
+        cmd("set-merge-base", "Choose merge base branch"),
+        cmd("quit", "Quit the application"),
+    ];
+    local_diff.picker = Some(Picker::new("Commands", items));
+    local_diff.picker_kind = "command".to_string();
+}
+
+fn open_help_palette(local_diff: &mut LocalDiff) {
+    let cmd = |name: &str, desc: &str| PickerItem {
+        label: name.into(),
+        description: desc.into(),
+        value: format!("cmd:{name}"),
+    };
+    let key = |keys: &str, desc: &str| PickerItem {
+        label: keys.into(),
+        description: desc.into(),
+        value: String::new(),
+    };
+
+    let items = vec![
+        cmd("refresh", "Reload diff from disk"),
+        cmd("view-on-github", "Open PR in browser"),
+        cmd("set-merge-base", "Choose merge base branch"),
+        cmd("quit", "Quit the application"),
+        key("j/k", "Move cursor up/down"),
+        key("h/l", "Focus tree/diff/panel"),
+        key("Ctrl+d/u", "Half-page down/up"),
+        key("Ctrl+f/b", "Full-page down/up"),
+        key("gg/G", "Go to top/bottom"),
+        key("]c/[c", "Next/prev comment thread"),
+        key("/", "Search in file"),
+        key("n/N", "Next/prev search match"),
+        key("Ctrl+p", "File picker"),
+        key(":", "Command palette"),
+        key("s/u", "Stage/unstage line"),
+        key("S/U", "Stage/unstage hunk"),
+        key("c", "Ask Copilot about hunk"),
+        key("r", "Reply to comment"),
+        key("x", "Resolve/unresolve thread"),
+        key("Enter", "Open comment thread / start comment"),
+        key("m", "Cycle diff mode"),
+    ];
+    local_diff.picker = Some(Picker::new("Help", items));
+    local_diff.picker_kind = "command".to_string();
 }
 
 fn handle_search_key(local_diff: &mut LocalDiff, key: KeyEvent) {
-    use crate::ui::scroll::Scrollable;
     match key.code {
         KeyCode::Enter => {
             local_diff.viewer.search.confirm();
@@ -416,7 +513,7 @@ fn incsearch_jump(local_diff: &mut LocalDiff) {
     }
 }
 
-async fn handle_picker_key(local_diff: &mut LocalDiff, key: KeyEvent) {
+async fn handle_picker_key(local_diff: &mut LocalDiff, key: KeyEvent) -> Option<String> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Esc => {
@@ -446,6 +543,16 @@ async fn handle_picker_key(local_diff: &mut LocalDiff, key: KeyEvent) {
                             }
                         }
                     }
+                    "merge-base" => {
+                        local_diff.merge_base_ref = item.value.clone();
+                        local_diff.mode = DiffMode::Branch;
+                        local_diff.load_diff();
+                    }
+                    "command" => {
+                        if let Some(cmd) = item.value.strip_prefix("cmd:") {
+                            return Some(cmd.to_string());
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -472,6 +579,7 @@ async fn handle_picker_key(local_diff: &mut LocalDiff, key: KeyEvent) {
         }
         _ => {}
     }
+    None
 }
 
 pub fn move_tree_cursor(local_diff: &mut LocalDiff, delta: i32) {

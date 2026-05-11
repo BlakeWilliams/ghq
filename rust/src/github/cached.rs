@@ -17,6 +17,7 @@ struct CacheEntry<T> {
     last_accessed: Instant,
 }
 
+#[derive(Clone)]
 pub struct CachedClient {
     client: Client,
     pr_list: Arc<RwLock<HashMap<String, CacheEntry<Vec<PullRequest>>>>>,

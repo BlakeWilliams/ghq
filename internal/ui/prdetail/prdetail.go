@@ -200,6 +200,10 @@ type Model struct {
 	localBranch       bool   // true if PR branch == local branch
 	refWatcher        *watcher.RefWatcher
 	copilotTickActive bool   // true while a copilot tick chain is running
+
+	// Error display
+	errorMsg      string
+	errorExpireAt time.Time
 }
 
 func New(pr github.PullRequest, ctx *uictx.Context, width, height int) Model {
@@ -528,7 +532,7 @@ func (m Model) Update(msg tea.Msg) (uictx.View, tea.Cmd) {
 		return m, nil
 
 	case CommentErrorMsg:
-		// TODO: show error to user
+		m.setError(fmt.Sprintf("Failed to post comment: %v", msg.Err))
 		return m, nil
 
 	case uictx.QueryErrMsg:
@@ -812,6 +816,7 @@ func (m *Model) selectTreeEntry() tea.Cmd {
 // editorFinishedMsg is sent when $EDITOR exits.
 type copilotTickMsg struct{}
 type refetchPRMsg struct{}
+type errorExpireMsg struct{}
 
 
 type editorFinishedMsg struct {
@@ -995,6 +1000,13 @@ func (m Model) handleCommentKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 			m.rebuildContent()
 			return m, nil, true
 		}
+
+		// Validate that we're not trying to post on line 0 (invalid for GitHub API).
+		if m.replyToID == nil && m.dv.CommentLine == 0 {
+			m.setError("Cannot post GitHub comment on line 0. Use Enter to post as local comment instead.")
+			return m, nil, true
+		}
+
 		m.dv.Composing = false
 		var cmd tea.Cmd
 		if m.replyToID != nil {
@@ -1756,6 +1768,19 @@ func (m *Model) formatFile(index int) {
 func (m *Model) reformatAllFiles() {
 	m.syncCommentSource()
 	m.dv.ReformatAllFiles()
+}
+
+// setError displays an error message to the user for 5 seconds.
+func (m *Model) setError(msg string) {
+	m.errorMsg = msg
+	m.errorExpireAt = time.Now().Add(5 * time.Second)
+}
+
+// clearExpiredError clears the error message if it has expired.
+func (m *Model) clearExpiredError() {
+	if m.errorMsg != "" && time.Now().After(m.errorExpireAt) {
+		m.errorMsg = ""
+	}
 }
 
 // commentsForFile returns base comments for a file (no pending copilot).

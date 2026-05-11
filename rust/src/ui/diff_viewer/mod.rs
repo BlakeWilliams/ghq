@@ -35,6 +35,9 @@ pub struct LayoutInfo {
     pub help_line: Vec<(String, String)>,
     pub comment_counts: std::collections::HashMap<String, usize>,
     pub copilot_working_files: std::collections::HashSet<String>,
+    pub pr_number: Option<u64>,
+    pub pr_owner: String,
+    pub pr_repo: String,
 }
 
 pub struct DiffViewer {
@@ -671,8 +674,25 @@ impl DiffViewer {
     ) {
         let right_w = (area.width as usize).saturating_sub(tree_w);
         let tree_inner = tree_w.saturating_sub(1);
+
+        // Build PR badge text (right-aligned in the tree pane)
+        let (pr_text, pr_w) = if let Some(pr_num) = info.pr_number {
+            let text = format!("PR#{pr_num}");
+            let w = UnicodeWidthStr::width(text.as_str()) + 1; // +1 trailing space
+            (Some(text), w)
+        } else {
+            (None, 0)
+        };
+
+        // Truncate branch name to fit alongside PR badge
         let branch = &info.branch_name;
-        let max_w = tree_inner.saturating_sub(2);
+        let min_gap = if pr_w > 0 { 1 } else { 0 };
+        let max_w = tree_inner
+            .saturating_sub(pr_w)
+            .saturating_sub(min_gap)
+            .saturating_sub(1) // leading space in branch text
+            .max(4);
+
         let name = if UnicodeWidthStr::width(branch.as_str()) > max_w {
             let mut n = String::new();
             let mut w = 0;
@@ -690,15 +710,23 @@ impl DiffViewer {
             branch.clone()
         };
 
-        let name_span = Span::styled(format!(" {name}"), Style::default().fg(Color::DarkGray));
-        let name_w = UnicodeWidthStr::width(name_span.content.as_ref());
-        let pad = tree_inner.saturating_sub(name_w);
+        let branch_text = format!(" {name}");
+        let branch_w = UnicodeWidthStr::width(branch_text.as_str());
+
+        let gap = tree_inner.saturating_sub(branch_w + pr_w);
 
         let mut spans = vec![
-            name_span,
-            Span::raw(" ".repeat(pad)),
-            Span::styled("│", Style::default().fg(colors.chrome_fg)),
+            Span::styled(branch_text, Style::default().fg(Color::DarkGray)),
+            Span::raw(" ".repeat(gap)),
         ];
+
+        if let Some(ref text) = pr_text {
+            let style = Style::default().fg(Color::Cyan);
+            spans.push(Span::styled(text.clone(), style));
+            spans.push(Span::raw(" "));
+        }
+
+        spans.push(Span::styled("│", Style::default().fg(colors.chrome_fg)));
 
         // Help hints in the right pane
         if !info.help_line.is_empty() {
@@ -726,6 +754,22 @@ impl DiffViewer {
         }
 
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
+
+        if let (Some(pr_num), Some(text)) = (info.pr_number, &pr_text) {
+            let url = format!(
+                "https://github.com/{}/{}/pull/{}",
+                info.pr_owner, info.pr_repo, pr_num
+            );
+            let pr_col = area.x + branch_w as u16 + gap as u16;
+            super::hyperlink::inject_hyperlink(
+                frame.buffer_mut(),
+                pr_col,
+                area.y,
+                area.width.saturating_sub(pr_col - area.x),
+                text,
+                &url,
+            );
+        }
     }
 
     fn render_diff_row(

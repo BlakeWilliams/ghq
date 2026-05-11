@@ -52,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
         current_branch,
         config,
         cached_client,
-    );
+    ).await;
 
     app.run().await
 }

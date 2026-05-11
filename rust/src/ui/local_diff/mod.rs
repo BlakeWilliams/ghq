@@ -10,7 +10,8 @@ use tokio::sync::mpsc;
 use crate::agent::AgentRunner;
 use crate::agent::types::AgentEvent;
 use crate::git::diff::{self, DiffMode};
-use crate::github::types::PullRequestFile;
+use crate::github::CachedClient;
+use crate::github::types::{PullRequest, PullRequestFile, ReviewComment};
 use crate::review::comments::{CommentAuthor, CommentStore, ContentBlock, LocalComment, ToolEntry};
 use super::composing_state::ComposingState;
 use super::copilot_state::{CopilotState, CompletedReply, ToolCall, ToolGroup, ToolStatus};
@@ -40,6 +41,13 @@ pub enum DiffLoaded {
     },
 }
 
+/// Events arriving from background GitHub API calls.
+pub enum GithubEvent {
+    PrDetected(PullRequest),
+    ReviewComments(Vec<ReviewComment>),
+    Error(String),
+}
+
 pub struct HighlightResult {
     pub filename: String,
     pub hl_new: Vec<Vec<(ratatui::style::Style, String)>>,
@@ -51,6 +59,8 @@ pub struct LocalDiff {
     pub repo_root: String,
     pub mode: DiffMode,
     pub base_branch: String,
+    pub merge_base_ref: String,
+    pub default_branch: String,
     pub composing: ComposingState,
     pub comment_store: CommentStore,
     pub copilot_state: CopilotState,
@@ -58,20 +68,31 @@ pub struct LocalDiff {
     pub diff_tx: mpsc::UnboundedSender<DiffLoaded>,
     pub highlight_tx: mpsc::UnboundedSender<HighlightResult>,
     pub highlight_rx: mpsc::UnboundedReceiver<HighlightResult>,
+    pub github_tx: mpsc::UnboundedSender<GithubEvent>,
+    pub github_rx: mpsc::UnboundedReceiver<GithubEvent>,
+    pub github: Option<CachedClient>,
+    pub owner: String,
+    pub repo_name: String,
     pub colors: DiffColors,
     pub picker: Option<Picker>,
     pub picker_kind: String,
+    pub pr: Option<PullRequest>,
+    pub pr_loaded: bool,
+    pub flash: super::flash::FlashState,
 }
 
 impl LocalDiff {
     pub fn new(repo_root: String, mode: DiffMode, diff_tx: mpsc::UnboundedSender<DiffLoaded>) -> Self {
         let comment_store = CommentStore::new(&repo_root, "");
         let (highlight_tx, highlight_rx) = mpsc::unbounded_channel();
+        let (github_tx, github_rx) = mpsc::unbounded_channel();
         Self {
             viewer: DiffViewer::new(mode),
             repo_root,
             mode,
             base_branch: String::new(),
+            merge_base_ref: String::new(),
+            default_branch: String::new(),
             composing: ComposingState::new(),
             comment_store,
             copilot_state: CopilotState::new(),
@@ -79,9 +100,17 @@ impl LocalDiff {
             diff_tx,
             highlight_tx,
             highlight_rx,
+            github_tx,
+            github_rx,
+            github: None,
+            owner: String::new(),
+            repo_name: String::new(),
             colors: DiffColors::default(),
             picker: None,
             picker_kind: String::new(),
+            pr: None,
+            pr_loaded: false,
+            flash: super::flash::FlashState::new(),
         }
     }
 
@@ -89,10 +118,10 @@ impl LocalDiff {
     pub fn load_diff(&self) {
         let repo_root = self.repo_root.clone();
         let mode = self.mode;
-        let base_branch = self.base_branch.clone();
+        let merge_base_ref = self.merge_base_ref.clone();
         let tx = self.diff_tx.clone();
         tokio::spawn(async move {
-            let raw = match diff::diff(&repo_root, mode, &base_branch).await {
+            let raw = match diff::diff(&repo_root, mode, &merge_base_ref).await {
                 Ok(d) => d,
                 Err(e) => {
                     tracing::error!("Failed to load diff: {e}");
@@ -113,11 +142,11 @@ impl LocalDiff {
     pub fn reload_diff_with_branch(&self, new_branch: Option<String>) {
         let repo_root = self.repo_root.clone();
         let mode = self.mode;
-        let base_branch = new_branch.as_deref().unwrap_or(&self.base_branch).to_string();
+        let merge_base_ref = self.merge_base_ref.clone();
         let tx = self.diff_tx.clone();
         let branch = new_branch;
         tokio::spawn(async move {
-            let raw = match diff::diff(&repo_root, mode, &base_branch).await {
+            let raw = match diff::diff(&repo_root, mode, &merge_base_ref).await {
                 Ok(d) => d,
                 Err(e) => {
                     tracing::error!("Failed to reload diff: {e}");
@@ -129,8 +158,79 @@ impl LocalDiff {
         });
     }
 
+    /// Fetch the PR associated with the current branch in the background.
+    pub fn fetch_pr(&self, github: &CachedClient, owner: &str, repo: &str) {
+        let github = github.clone();
+        let owner = owner.to_string();
+        let repo = repo.to_string();
+        let branch = self.base_branch.clone();
+        let tx = self.github_tx.clone();
+        tokio::spawn(async move {
+            match github.pull_request_by_branch(&owner, &repo, &branch).await {
+                Ok(Some(pr)) => {
+                    tracing::info!("PR #{} detected for branch {branch}", pr.number);
+                    let _ = tx.send(GithubEvent::PrDetected(pr));
+                }
+                Ok(None) => {
+                    tracing::debug!("No PR found for branch {branch}");
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to fetch PR for branch {branch}: {e}");
+                }
+            }
+        });
+    }
+
+    /// Fetch review comments for the detected PR in the background.
+    pub fn fetch_review_comments(&self, github: &CachedClient, owner: &str, repo: &str) {
+        let Some(pr) = &self.pr else { return };
+        let number = pr.number;
+        let github = github.clone();
+        let owner = owner.to_string();
+        let repo = repo.to_string();
+        let tx = self.github_tx.clone();
+        tokio::spawn(async move {
+            match github.review_comments(&owner, &repo, number).await {
+                Ok(comments) => {
+                    tracing::info!("Fetched {} review comments for PR #{number}", comments.len());
+                    let _ = tx.send(GithubEvent::ReviewComments(comments));
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to fetch review comments for PR #{number}: {e}");
+                }
+            }
+        });
+    }
+
+    /// Handle a GitHub event arriving from a background fetch.
+    pub async fn handle_github_event(&mut self, event: GithubEvent, github: &CachedClient, owner: &str, repo: &str) {
+        match event {
+            GithubEvent::PrDetected(pr) => {
+                self.merge_base_ref = format!("origin/{}", pr.base.ref_name);
+                self.owner = pr.repo_owner().to_string();
+                self.repo_name = pr.repo_name().to_string();
+                self.pr = Some(pr);
+                self.pr_loaded = true;
+                let o = self.owner.clone();
+                let r = self.repo_name.clone();
+                self.fetch_review_comments(github, &o, &r);
+            }
+            GithubEvent::ReviewComments(comments) => {
+                self.comment_store.import_gh(&comments);
+                if let Some(f) = self.viewer.file_list.files.get(self.viewer.file_list.current_file_idx) {
+                    let filename = f.filename.clone();
+                    self.place_file_comments(&filename);
+                }
+            }
+            GithubEvent::Error(msg) => {
+                self.flash.error(msg);
+            }
+        }
+    }
+
     /// Apply the result of a background diff load. Called from the event loop.
     pub async fn apply_diff_loaded(&mut self, result: DiffLoaded) {
+        let is_reload = matches!(result, DiffLoaded::Reload { .. });
         match result {
             DiffLoaded::Full { files } => {
                 self.viewer.set_files(files);
@@ -140,33 +240,40 @@ impl LocalDiff {
                 if let Some(b) = branch {
                     self.base_branch = b;
                 }
-                self.viewer.clear_highlight_cache();
                 self.viewer.update_files(files);
                 self.viewer.file_list.sync_cursor();
             }
         }
         self.viewer.file_list.loaded = true;
-        self.refresh_current_file().await;
+        self.refresh_current_file(is_reload).await;
     }
 
-    pub(crate) async fn refresh_current_file(&mut self) {
+    pub(crate) async fn refresh_current_file(&mut self, preserve_panel: bool) {
         if self.viewer.file_list.files.is_empty() {
             self.viewer.set_diff_lines(Vec::new(), "");
             return;
         }
 
-        // Close the comment panel when switching files
-        if self.viewer.panel.visible {
-            self.viewer.panel.close();
-            self.viewer.panel_focused = false;
-        }
-
         let idx = self.viewer.file_list.current_file_idx.min(self.viewer.file_list.files.len() - 1);
         let filename = self.viewer.file_list.files[idx].filename.clone();
+
+        // Close the comment panel when switching files, but keep it open
+        // on reloads if it's showing a thread for the current file
+        if self.viewer.panel.visible && !preserve_panel {
+            if self.viewer.panel.file_path != filename {
+                self.viewer.panel.close();
+                self.viewer.panel_focused = false;
+            }
+        }
+
         let patch = self.viewer.file_list.files[idx].patch.clone();
         let diff_lines = parse_patch_to_diff_lines(&patch);
 
+        // On reload, try to apply cached highlights immediately to avoid
+        // a flash of unstyled content
         self.viewer.set_diff_lines(diff_lines, &filename);
+        self.viewer.highlights.apply_cached(&mut self.viewer.render_list, &filename);
+
         self.place_file_comments(&filename);
 
         // Highlight current file; prefetch chain continues in apply_highlight_result
@@ -315,7 +422,7 @@ impl LocalDiff {
             self.viewer.scroll.cursor = 0;
             self.viewer.scroll.offset = 0;
             self.viewer.file_list.sync_cursor();
-            self.refresh_current_file().await;
+            self.refresh_current_file(false).await;
         }
     }
 
@@ -329,14 +436,20 @@ impl LocalDiff {
             self.viewer.scroll.cursor = 0;
             self.viewer.scroll.offset = 0;
             self.viewer.file_list.sync_cursor();
-            self.refresh_current_file().await;
+            self.refresh_current_file(false).await;
         }
     }
 
-    pub fn cycle_mode(&mut self) {
+    pub fn cycle_mode(&mut self, is_default_branch: bool) {
         self.mode = match self.mode {
             DiffMode::Working => DiffMode::Staged,
-            DiffMode::Staged => DiffMode::Branch,
+            DiffMode::Staged => {
+                if is_default_branch {
+                    DiffMode::Working
+                } else {
+                    DiffMode::Branch
+                }
+            }
             DiffMode::Branch => DiffMode::Working,
         };
         self.viewer.mode = self.mode;
@@ -592,7 +705,94 @@ impl LocalDiff {
         let line = self.composing.line;
         let side = self.composing.side.clone();
         let reply_to = self.composing.reply_to.clone();
+        let reply_mode = self.composing.reply_mode;
         self.composing.take_input();
+
+        // If replying to a GitHub thread in GitHub mode, post via API
+        let gh_comment_id = if reply_mode == panel::ReplyMode::GitHub {
+            if let Some(ref rt) = reply_to {
+                if let Some(root) = self.comment_store.find_thread_root(rt) {
+                    crate::review::comments::parse_gh_id(&root.id)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let (Some(gh_root_id), Some(pr), Some(github)) = (gh_comment_id, &self.pr, &self.github) {
+            let github = github.clone();
+            let owner = self.owner.clone();
+            let repo = self.repo_name.clone();
+            let pr_number = pr.number;
+            let body_clone = body.clone();
+            let tx = self.github_tx.clone();
+            tokio::spawn(async move {
+                match github.reply_to_comment(&owner, &repo, pr_number, gh_root_id, &body_clone).await {
+                    Ok(_reply) => {
+                        tracing::info!("Posted reply to GitHub comment gh-{gh_root_id}");
+                        match github.review_comments(&owner, &repo, pr_number).await {
+                            Ok(comments) => {
+                                let _ = tx.send(GithubEvent::ReviewComments(comments));
+                            }
+                            Err(e) => tracing::warn!("Failed to refresh comments after reply: {e}"),
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to post reply to GitHub: {e}");
+                        let _ = tx.send(GithubEvent::Error(format!("Reply failed: {e}")));
+                    }
+                }
+            });
+        } else if reply_to.is_none() {
+            // New top-level comment: if a PR is open, post as a review comment
+            if let (Some(pr), Some(github)) = (&self.pr, &self.github) {
+                let github = github.clone();
+                let owner = self.owner.clone();
+                let repo = self.repo_name.clone();
+                let pr_number = pr.number;
+                let commit_id = pr.head.sha.clone();
+                let body_clone = body.clone();
+                let path_clone = path.clone();
+                let side_clone = side.clone();
+                let tx = self.github_tx.clone();
+                tokio::spawn(async move {
+                    match github.create_review_comment(
+                        &owner, &repo, pr_number, &body_clone, &commit_id,
+                        &path_clone, line as i32, &side_clone,
+                    ).await {
+                        Ok(_comment) => {
+                            tracing::info!("Posted new review comment on {path_clone}:{line}");
+                            match github.review_comments(&owner, &repo, pr_number).await {
+                                Ok(comments) => {
+                                    let _ = tx.send(GithubEvent::ReviewComments(comments));
+                                }
+                                Err(e) => tracing::warn!("Failed to refresh comments after create: {e}"),
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to create review comment on GitHub: {e}");
+                            let _ = tx.send(GithubEvent::Error(format!("Comment failed: {e}")));
+                        }
+                    }
+                });
+            }
+        }
+
+        // For GitHub-mode replies to GH threads or new GH comments, we don't
+        // create a local comment. The success path refreshes from the API.
+        // Only create local comments for Copilot mode or non-GH contexts.
+        let posted_to_gh = gh_comment_id.is_some()
+            || (reply_to.is_none() && reply_mode == panel::ReplyMode::GitHub && self.pr.is_some() && self.github.is_some());
+
+        if posted_to_gh {
+            // Nothing to do locally — the spawned task will refresh on success
+            // or show a flash error on failure.
+            return;
+        }
 
         let comment_id = format!("local-{}", uuid_v4());
         tracing::info!("Submitting comment {comment_id} on {path}:{line} ({side})");
@@ -613,15 +813,6 @@ impl LocalDiff {
         };
         let _ = self.comment_store.add(comment);
 
-        let diff_hunk = self.build_diff_context(self.viewer.scroll.cursor);
-        let prompt = format!(
-            "The user left a comment on `{}` line {} ({}):\n\n{}\n\nDiff context:\n```\n{}\n```\n\nPlease provide a helpful response.",
-            path, line, side, body, diff_hunk
-        );
-
-        self.copilot_state
-            .set_pending(comment_id.clone(), path.clone(), line, side);
-
         // Re-place comment threads in the render list
         self.place_file_comments(&path);
 
@@ -632,36 +823,54 @@ impl LocalDiff {
             .map(|c| c.id.clone())
             .unwrap_or_else(|| comment_id.clone());
 
-        // Show thread with pending indicator immediately
-        let mut comments = self.build_panel_comments(&root_id);
-        comments.push(PanelComment {
-            author: "Copilot".to_string(),
-            is_copilot: true,
-            blocks: vec![crate::ui::copilot_state::ContentBlock::Text("Thinking...".to_string())],
-            is_pending: true,
-            created_at: chrono_now(),
-        });
-        let file_path = self.current_filename();
-        let ctx = self.viewer.panel_diff_context(&self.colors);
-        self.viewer.panel.open_thread(root_id.clone(), comments, file_path, ctx);
-        self.viewer.panel_focused = true;
-        self.viewer.file_list.focused = false;
+        if reply_mode == panel::ReplyMode::Copilot {
+            let diff_hunk = self.build_diff_context(self.viewer.scroll.cursor);
+            let prompt = format!(
+                "The user left a comment on `{}` line {} ({}):\n\n{}\n\nDiff context:\n```\n{}\n```\n\nPlease provide a helpful response.",
+                path, line, side, body, diff_hunk
+            );
 
-        tracing::info!("Sending prompt to copilot agent for {comment_id}");
-        if let Err(e) = agent.send(&comment_id, &prompt).await {
-            tracing::error!("Failed to send to copilot: {e}");
-            // Show error in panel
+            self.copilot_state
+                .set_pending(comment_id.clone(), path.clone(), line, side);
+
+            // Show thread with pending indicator immediately
             let mut comments = self.build_panel_comments(&root_id);
             comments.push(PanelComment {
                 author: "Copilot".to_string(),
                 is_copilot: true,
-                blocks: vec![crate::ui::copilot_state::ContentBlock::Text(format!("⚠ {e}"))],
-                is_pending: false,
+                blocks: vec![crate::ui::copilot_state::ContentBlock::Text("Thinking...".to_string())],
+                is_pending: true,
                 created_at: chrono_now(),
             });
             let file_path = self.current_filename();
-            let ctx = self.viewer.panel.diff_context.clone();
+            let ctx = self.viewer.panel_diff_context(&self.colors);
+            self.viewer.panel.open_thread(root_id.clone(), comments, file_path, ctx);
+            self.viewer.panel_focused = true;
+            self.viewer.file_list.focused = false;
+
+            tracing::info!("Sending prompt to copilot agent for {comment_id}");
+            if let Err(e) = agent.send(&comment_id, &prompt).await {
+                tracing::error!("Failed to send to copilot: {e}");
+                let mut comments = self.build_panel_comments(&root_id);
+                comments.push(PanelComment {
+                    author: "Copilot".to_string(),
+                    is_copilot: true,
+                    blocks: vec![crate::ui::copilot_state::ContentBlock::Text(format!("⚠ {e}"))],
+                    is_pending: false,
+                    created_at: chrono_now(),
+                });
+                let file_path = self.current_filename();
+                let ctx = self.viewer.panel.diff_context.clone();
+                self.viewer.panel.open_thread(root_id, comments, file_path, ctx);
+            }
+        } else {
+            // GitHub reply mode: just show the updated thread without Copilot
+            let comments = self.build_panel_comments(&root_id);
+            let file_path = self.current_filename();
+            let ctx = self.viewer.panel_diff_context(&self.colors);
             self.viewer.panel.open_thread(root_id, comments, file_path, ctx);
+            self.viewer.panel_focused = true;
+            self.viewer.file_list.focused = false;
         }
     }
 
@@ -699,6 +908,9 @@ impl LocalDiff {
             help_line: self.build_help_line(),
             comment_counts: self.comment_store.thread_counts_by_file(),
             copilot_working_files,
+            pr_number: self.pr.as_ref().map(|p| p.number),
+            pr_owner: self.owner.clone(),
+            pr_repo: self.repo_name.clone(),
         };
 
         // Show composing input in the panel reply area
@@ -715,7 +927,7 @@ impl LocalDiff {
             }
             self.viewer.panel.set_reply_view(
                 self.composing.input.clone(),
-                panel::ReplyMode::Copilot,
+                self.composing.reply_mode,
             );
         } else {
             self.viewer.panel.clear_reply_view();
@@ -760,6 +972,10 @@ impl LocalDiff {
                 .border_color(colors.border_fg)
                 .render(frame, area);
         }
+
+        // Flash notifications (top-right, rendered last so they're on top)
+        self.flash.gc();
+        self.flash.render(frame, area);
     }
 
     fn build_help_line(&self) -> Vec<(String, String)> {
@@ -768,6 +984,7 @@ impl LocalDiff {
 
         if self.composing.is_active() {
             hints.push(h("esc", "cancel"));
+            hints.push(h("shift+tab", "switch mode"));
             hints.push(h("enter", "submit"));
             return hints;
         }
@@ -796,6 +1013,9 @@ impl LocalDiff {
             hints.push(h("f", "focus tree"));
             hints.push(h("↵", "comment"));
             hints.push(h("c", "ask copilot"));
+            if self.viewer.render_list.badge_at(self.viewer.scroll.cursor).is_some() {
+                hints.push(h("x", "resolve"));
+            }
             match self.mode {
                 DiffMode::Working => {
                     hints.push(h("s", "stage line"));
@@ -906,10 +1126,5 @@ fn uuid_v4() -> String {
 }
 
 fn chrono_now() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    format!("{secs}")
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }

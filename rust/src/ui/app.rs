@@ -47,10 +47,13 @@ pub struct App {
     pub agent: Arc<dyn AgentRunner>,
     ctrl_c_count: u8,
     diff_rx: mpsc::UnboundedReceiver<DiffLoaded>,
+    /// Suppress key events until this instant to discard stale OSC responses
+    /// that crossterm parsed as garbage key events before drain_stdin ran.
+    suppress_keys_until: Option<std::time::Instant>,
 }
 
 impl App {
-    pub fn new(
+    pub async fn new(
         repo_root: String,
         owner: String,
         repo: String,
@@ -66,6 +69,12 @@ impl App {
             diff_tx,
         );
         local_diff.base_branch = branch.clone();
+        local_diff.default_branch = crate::git::default_branch_short(&repo_root)
+            .await
+            .unwrap_or_else(|_| "main".to_string());
+        local_diff.github = Some(github.clone());
+        local_diff.owner = owner.clone();
+        local_diff.repo_name = repo.clone();
         let agent: Arc<dyn AgentRunner> = Arc::new(CopilotAgent::new(repo_root.clone()));
 
         Self {
@@ -84,6 +93,7 @@ impl App {
             agent,
             ctrl_c_count: 0,
             diff_rx,
+            suppress_keys_until: None,
         }
     }
 
@@ -212,11 +222,16 @@ impl App {
 
         let mut agent_open = true;
 
+        // Periodic review comment refresh (every 60s when a PR is detected)
+        let mut comment_refresh = interval(Duration::from_secs(60));
+        comment_refresh.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
         // Schedule the initial draw.
         redraw.notify_one();
 
         loop {
-            let needs_animation = self.local_diff.copilot_state.has_pending();
+            let needs_animation = self.local_diff.copilot_state.has_pending()
+                || !self.local_diff.flash.is_empty();
 
             tokio::select! {
                 biased;
@@ -269,6 +284,10 @@ impl App {
                     redraw.notify_one();
                 }
 
+                _ = comment_refresh.tick(), if self.local_diff.pr.is_some() => {
+                    self.local_diff.fetch_review_comments(&self.github, &self.owner, &self.repo);
+                }
+
                 watch_ev = watch_events.recv() => {
                     if let Some(ev) = watch_ev {
                         match ev {
@@ -278,7 +297,9 @@ impl App {
                             }
                             WatchEvent::BranchChanged(branch) => {
                                 tracing::info!("File watcher: branch changed to {branch}");
-                                self.local_diff.reload_diff_with_branch(Some(branch));
+                                self.branch = branch.clone();
+                                self.local_diff.base_branch = branch;
+                                self.local_diff.reload_diff();
                             }
                         }
                     }
@@ -286,7 +307,21 @@ impl App {
 
                 diff_result = self.diff_rx.recv() => {
                     if let Some(result) = diff_result {
+                        let is_first_load = !self.local_diff.pr_loaded && self.local_diff.pr.is_none();
                         self.local_diff.apply_diff_loaded(result).await;
+                        if is_first_load {
+                            self.local_diff.fetch_pr(&self.github, &self.owner, &self.repo);
+                        }
+                        redraw.notify_one();
+                    }
+                }
+
+                github_event = self.local_diff.github_rx.recv() => {
+                    if let Some(event) = github_event {
+                        let github = self.github.clone();
+                        let owner = self.owner.clone();
+                        let repo = self.repo.clone();
+                        self.local_diff.handle_github_event(event, &github, &owner, &repo).await;
                         redraw.notify_one();
                     }
                 }
@@ -305,7 +340,17 @@ impl App {
 
     async fn handle_event(&mut self, ev: Event) {
         match ev {
-            Event::Key(key) => self.handle_key(key).await,
+            Event::Key(key) => {
+                // Discard keys that arrived during the suppression window
+                // (stale OSC palette responses parsed as garbage chars).
+                if let Some(until) = self.suppress_keys_until {
+                    if std::time::Instant::now() < until {
+                        return;
+                    }
+                    self.suppress_keys_until = None;
+                }
+                self.handle_key(key).await;
+            }
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
@@ -315,6 +360,11 @@ impl App {
                 // Drain stale OSC palette responses that terminals may defer
                 // until the window regains focus.
                 crate::terminal::palette::drain_stdin();
+                // Suppress key events for 100ms — crossterm may have already
+                // parsed some OSC response bytes into its event queue as
+                // garbage key events before drain_stdin could discard them.
+                self.suppress_keys_until =
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(50));
             }
             _ => {}
         }

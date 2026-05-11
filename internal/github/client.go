@@ -161,7 +161,7 @@ func (c *Client) ReplyToReviewComment(ctx context.Context, owner, repo string, n
 		return ReviewComment{}, err
 	}
 
-	apiPath := fmt.Sprintf("repos/%s/%s/pulls/%d/comments/%d/replies", owner, repo, number, commentID)
+	apiPath := fmt.Sprintf("repos/%s/%s/pulls/comments/%d/replies", owner, repo, commentID)
 	var comment ReviewComment
 	err = c.rest.Post(apiPath, bytes.NewReader(jsonBody), &comment)
 	if err != nil {

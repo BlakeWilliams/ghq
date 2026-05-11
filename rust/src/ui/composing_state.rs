@@ -1,3 +1,5 @@
+use crate::ui::diff_viewer::panel::ReplyMode;
+
 pub struct ComposingState {
     active: bool,
     pub input: String,
@@ -5,6 +7,7 @@ pub struct ComposingState {
     pub line: i32,
     pub side: String,
     pub reply_to: Option<String>,
+    pub reply_mode: ReplyMode,
 }
 
 impl ComposingState {
@@ -16,6 +19,7 @@ impl ComposingState {
             line: 0,
             side: String::new(),
             reply_to: None,
+            reply_mode: ReplyMode::Copilot,
         }
     }
 
@@ -30,6 +34,7 @@ impl ComposingState {
         self.line = line;
         self.side = side;
         self.reply_to = None;
+        self.reply_mode = ReplyMode::Copilot;
     }
 
     pub fn start_reply(&mut self, reply_to: String, path: String, line: i32, side: String) {
@@ -39,17 +44,37 @@ impl ComposingState {
         self.line = line;
         self.side = side;
         self.reply_to = Some(reply_to);
+        self.reply_mode = ReplyMode::Copilot;
+    }
+
+    pub fn start_reply_with_mode(&mut self, reply_to: String, path: String, line: i32, side: String, mode: ReplyMode) {
+        self.active = true;
+        self.input.clear();
+        self.path = path;
+        self.line = line;
+        self.side = side;
+        self.reply_to = Some(reply_to);
+        self.reply_mode = mode;
+    }
+
+    pub fn toggle_reply_mode(&mut self) {
+        self.reply_mode = match self.reply_mode {
+            ReplyMode::Copilot => ReplyMode::GitHub,
+            ReplyMode::GitHub => ReplyMode::Copilot,
+        };
     }
 
     pub fn cancel(&mut self) {
         self.active = false;
         self.input.clear();
         self.reply_to = None;
+        self.reply_mode = ReplyMode::Copilot;
     }
 
     pub fn take_input(&mut self) -> String {
         self.active = false;
         self.reply_to = None;
+        self.reply_mode = ReplyMode::Copilot;
         std::mem::take(&mut self.input)
     }
 }

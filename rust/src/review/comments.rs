@@ -1,5 +1,22 @@
 use serde::{Deserialize, Serialize};
 
+use crate::github::types::ReviewComment;
+
+/// Returns the local ID string for a GitHub comment ID.
+pub fn gh_id(id: u64) -> String {
+    format!("gh-{id}")
+}
+
+/// Returns true if the ID represents an imported GitHub comment.
+pub fn is_gh_id(id: &str) -> bool {
+    id.starts_with("gh-")
+}
+
+/// Parses a "gh-N" string back to the original GitHub numeric ID.
+pub fn parse_gh_id(id: &str) -> Option<u64> {
+    id.strip_prefix("gh-")?.parse().ok()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalComment {
     pub id: String,
@@ -151,6 +168,12 @@ impl CommentStore {
         thread
     }
 
+    pub fn thread_has_copilot_comment(&self, root_id: &str) -> bool {
+        self.thread_comments(root_id)
+            .iter()
+            .any(|c| matches!(c.author, CommentAuthor::Copilot))
+    }
+
     pub fn comments_for_file(&self, path: &str) -> Vec<&LocalComment> {
         self.comments
             .iter()
@@ -176,6 +199,38 @@ impl CommentStore {
                 *acc.entry(c.path.clone()).or_insert(0) += 1;
                 acc
             })
+    }
+
+    /// Import GitHub review comments, replacing any previous GH imports.
+    /// Local (non-GH) comments are preserved.
+    pub fn import_gh(&mut self, gh_comments: &[ReviewComment]) {
+        self.comments.retain(|c| !is_gh_id(&c.id));
+
+        for gc in gh_comments {
+            self.comments.push(gh_review_to_local(gc));
+        }
+    }
+}
+
+fn gh_review_to_local(c: &ReviewComment) -> LocalComment {
+    let line = c.line.or(c.original_line).unwrap_or(0);
+    let side = c.side.clone().unwrap_or_else(|| "RIGHT".to_string());
+    let created_at = c.updated_at.clone().unwrap_or_else(|| c.created_at.clone());
+    let in_reply_to_id = c.in_reply_to_id.map(gh_id);
+
+    LocalComment {
+        id: gh_id(c.id),
+        body: c.body.clone(),
+        author: CommentAuthor::GitHub(c.user.login.clone()),
+        in_reply_to_id,
+        path: c.path.clone(),
+        line,
+        side,
+        resolved: false,
+        created_at,
+        blocks: vec![ContentBlock::Text {
+            content: c.body.clone(),
+        }],
     }
 }
 
@@ -379,5 +434,105 @@ mod tests {
 
         assert_eq!(store.comments.len(), 5);
         assert!(store.comments.iter().all(|c| c.resolved), "All comments in deeply nested thread should be resolved");
+    }
+
+    fn make_review_comment(id: u64, body: &str, path: &str, line: i32, reply_to: Option<u64>) -> ReviewComment {
+        use crate::github::types::User;
+        ReviewComment {
+            id,
+            user: User {
+                login: "octocat".to_string(),
+                id: Some(1),
+                avatar_url: None,
+            },
+            body: body.to_string(),
+            path: path.to_string(),
+            line: Some(line),
+            original_line: None,
+            side: Some("RIGHT".to_string()),
+            diff_hunk: None,
+            in_reply_to_id: reply_to,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: None,
+            html_url: None,
+        }
+    }
+
+    #[test]
+    fn import_gh_converts_comments() {
+        let mut store = memory_store();
+        let gh_comments = vec![
+            make_review_comment(100, "looks good", "src/main.rs", 42, None),
+            make_review_comment(101, "thanks", "src/main.rs", 42, Some(100)),
+        ];
+
+        store.import_gh(&gh_comments);
+        assert_eq!(store.comments.len(), 2);
+        assert_eq!(store.comments[0].id, "gh-100");
+        assert_eq!(store.comments[0].path, "src/main.rs");
+        assert_eq!(store.comments[0].line, 42);
+        assert_eq!(store.comments[0].author, CommentAuthor::GitHub("octocat".to_string()));
+        assert_eq!(store.comments[1].id, "gh-101");
+        assert_eq!(store.comments[1].in_reply_to_id, Some("gh-100".to_string()));
+    }
+
+    #[test]
+    fn import_gh_preserves_local_comments() {
+        let mut store = memory_store();
+        store.comments.push(make_comment("local-1", "my note", CommentAuthor::You, None));
+
+        let gh_comments = vec![make_review_comment(200, "nit", "lib.rs", 10, None)];
+        store.import_gh(&gh_comments);
+
+        assert_eq!(store.comments.len(), 2);
+        assert_eq!(store.comments[0].id, "local-1");
+        assert_eq!(store.comments[1].id, "gh-200");
+    }
+
+    #[test]
+    fn import_gh_replaces_previous_gh_imports() {
+        let mut store = memory_store();
+        store.comments.push(make_comment("local-1", "my note", CommentAuthor::You, None));
+
+        let batch1 = vec![make_review_comment(100, "old", "a.rs", 1, None)];
+        store.import_gh(&batch1);
+        assert_eq!(store.comments.len(), 2);
+
+        let batch2 = vec![
+            make_review_comment(100, "updated", "a.rs", 1, None),
+            make_review_comment(101, "new", "b.rs", 5, None),
+        ];
+        store.import_gh(&batch2);
+        assert_eq!(store.comments.len(), 3); // 1 local + 2 GH
+        assert_eq!(store.comments[0].id, "local-1");
+        assert_eq!(store.comments[1].body, "updated");
+        assert_eq!(store.comments[2].id, "gh-101");
+    }
+
+    #[test]
+    fn import_gh_threading_works() {
+        let mut store = memory_store();
+        let gh_comments = vec![
+            make_review_comment(300, "root", "x.rs", 10, None),
+            make_review_comment(301, "reply", "x.rs", 10, Some(300)),
+        ];
+        store.import_gh(&gh_comments);
+
+        let thread = store.thread_comments("gh-300");
+        assert_eq!(thread.len(), 2);
+        assert_eq!(thread[0].id, "gh-300");
+        assert_eq!(thread[1].id, "gh-301");
+
+        let root = store.find_thread_root("gh-301").unwrap();
+        assert_eq!(root.id, "gh-300");
+    }
+
+    #[test]
+    fn gh_id_helpers() {
+        assert_eq!(gh_id(42), "gh-42");
+        assert!(is_gh_id("gh-42"));
+        assert!(!is_gh_id("local-1"));
+        assert_eq!(parse_gh_id("gh-42"), Some(42));
+        assert_eq!(parse_gh_id("local-1"), None);
     }
 }

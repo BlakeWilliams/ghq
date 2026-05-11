@@ -91,6 +91,8 @@ impl RenderItem {
 pub struct RenderList {
     items: Vec<RenderItem>,
     diff_line_map: HashMap<usize, usize>,
+    cached_total_lines: usize,
+    cached_gutter_width: usize,
 }
 
 impl RenderList {
@@ -98,6 +100,8 @@ impl RenderList {
         Self {
             items: Vec::new(),
             diff_line_map: HashMap::new(),
+            cached_total_lines: 0,
+            cached_gutter_width: 3,
         }
     }
 
@@ -106,7 +110,7 @@ impl RenderList {
         for line in lines {
             list.items.push(RenderItem::DiffLine(line));
         }
-        list.rebuild_diff_map();
+        list.rebuild_caches();
         list
     }
 
@@ -127,7 +131,7 @@ impl RenderList {
     }
 
     pub fn total_lines(&self) -> usize {
-        self.items.iter().map(|i| i.line_count()).sum()
+        self.cached_total_lines
     }
 
     pub fn diff_line_count(&self) -> usize {
@@ -164,13 +168,13 @@ impl RenderList {
         } else {
             self.items.push(item);
         }
-        self.rebuild_diff_map();
+        self.rebuild_caches();
     }
 
     pub fn remove_thread(&mut self, key: &str) {
         self.items
             .retain(|i| i.thread_key() != Some(key));
-        self.rebuild_diff_map();
+        self.rebuild_caches();
     }
 
     pub fn replace_thread(&mut self, key: &str, new_item: RenderItem) {
@@ -180,7 +184,7 @@ impl RenderList {
             .position(|i| i.thread_key() == Some(key))
         {
             self.items[pos] = new_item;
-            self.rebuild_diff_map();
+            self.rebuild_caches();
         }
     }
 
@@ -194,6 +198,8 @@ impl RenderList {
     pub fn clear(&mut self) {
         self.items.clear();
         self.diff_line_map.clear();
+        self.cached_total_lines = 0;
+        self.cached_gutter_width = 3;
     }
 
     /// Find the badge (if any) on the diff line at the given render index.
@@ -207,35 +213,33 @@ impl RenderList {
         })
     }
 
-    fn rebuild_diff_map(&mut self) {
-        self.diff_line_map.clear();
-        let mut diff_idx = 0;
-        for (i, item) in self.items.iter().enumerate() {
-            if item.is_diff_line() {
-                self.diff_line_map.insert(diff_idx, i);
-                diff_idx += 1;
-            }
-        }
+    pub fn gutter_width(&self) -> usize {
+        self.cached_gutter_width
     }
 
-    pub fn gutter_width(&self) -> usize {
-        let max_line = self
-            .items
-            .iter()
-            .filter_map(|i| i.as_diff_line())
-            .map(|dl| {
+    fn rebuild_caches(&mut self) {
+        // Rebuild diff_line_map
+        self.diff_line_map.clear();
+        let mut diff_idx = 0;
+        let mut max_line: usize = 0;
+        let mut total_lines: usize = 0;
+        for (i, item) in self.items.iter().enumerate() {
+            total_lines += item.line_count();
+            if let RenderItem::DiffLine(dl) = item {
+                self.diff_line_map.insert(diff_idx, i);
+                diff_idx += 1;
                 let a = dl.old_line_no.unwrap_or(0) as usize;
                 let b = dl.new_line_no.unwrap_or(0) as usize;
-                a.max(b)
-            })
-            .max()
-            .unwrap_or(0);
+                max_line = max_line.max(a).max(b);
+            }
+        }
+        self.cached_total_lines = total_lines;
         let digits = if max_line == 0 {
             1
         } else {
             (max_line as f64).log10() as usize + 1
         };
-        digits.max(3)
+        self.cached_gutter_width = digits.max(3);
     }
 
     /// Attach comment badges to diff lines based on comment positions.
@@ -329,7 +333,7 @@ impl RenderList {
             }
         }
 
-        self.rebuild_diff_map();
+        self.rebuild_caches();
     }
 }
 

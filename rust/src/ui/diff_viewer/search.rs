@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use regex::Regex;
 
 use super::render_list::{LineType, RenderItem, RenderList};
@@ -9,8 +10,10 @@ pub struct SearchState {
     pub query: String,
     /// Compiled regex from the query.
     pub pattern: Option<Regex>,
-    /// Render-list indices of diff lines that match.
+    /// Render-list indices of diff lines that match (ordered).
     pub matches: Vec<usize>,
+    /// Fast lookup set for match checking.
+    match_set: HashSet<usize>,
     /// Index into `matches` for the current highlighted match.
     pub match_idx: Option<usize>,
     /// Cursor position when `/` was pressed (for incsearch origin + cancel restore).
@@ -26,6 +29,7 @@ impl SearchState {
             query: String::new(),
             pattern: None,
             matches: Vec::new(),
+            match_set: HashSet::new(),
             match_idx: None,
             origin_cursor: 0,
             origin_offset: 0,
@@ -46,6 +50,7 @@ impl SearchState {
         if query.is_empty() {
             self.pattern = None;
             self.matches.clear();
+            self.match_set.clear();
             self.match_idx = None;
             return;
         }
@@ -62,6 +67,7 @@ impl SearchState {
     /// Scan the render list for matching diff lines (skips hunk headers).
     pub fn run_search(&mut self, render_list: &RenderList) {
         self.matches.clear();
+        self.match_set.clear();
         self.match_idx = None;
 
         let re = match &self.pattern {
@@ -76,6 +82,7 @@ impl SearchState {
                 }
                 if re.is_match(&dl.content) {
                     self.matches.push(idx);
+                    self.match_set.insert(idx);
                 }
             }
         }
@@ -92,6 +99,7 @@ impl SearchState {
         self.query.clear();
         self.pattern = None;
         self.matches.clear();
+        self.match_set.clear();
         self.match_idx = None;
     }
 
@@ -100,6 +108,7 @@ impl SearchState {
         self.query.clear();
         self.pattern = None;
         self.matches.clear();
+        self.match_set.clear();
         self.match_idx = None;
     }
 
@@ -138,7 +147,7 @@ impl SearchState {
 
     /// Returns true if the given render-list index is a search match.
     pub fn is_match(&self, render_idx: usize) -> bool {
-        self.pattern.is_some() && self.matches.contains(&render_idx)
+        self.pattern.is_some() && self.match_set.contains(&render_idx)
     }
 
     /// Returns true if the given render-list index is the current highlighted match.

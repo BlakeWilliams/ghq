@@ -439,6 +439,7 @@ pub struct PanelComment {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplyMode {
     GitHub,
     Copilot,
@@ -457,6 +458,8 @@ pub struct CommentPanel {
     pub resolved: bool,
     pub panel_line: i32,
     md_cache: std::collections::HashMap<(String, usize), Vec<Line<'static>>>,
+    cached_lines: Option<Vec<PanelLine>>,
+    cached_lines_width: usize,
 }
 
 const MIN_PANEL_WIDTH: u16 = 55;
@@ -487,6 +490,8 @@ impl CommentPanel {
             resolved: false,
             panel_line: 0,
             md_cache: std::collections::HashMap::new(),
+            cached_lines: None,
+            cached_lines_width: 0,
         }
     }
 
@@ -497,6 +502,7 @@ impl CommentPanel {
         self.comments = comments;
         self.file_path = file_path;
         self.diff_context = diff_context;
+        self.cached_lines = None;
         if changed_thread {
             self.scroll.scroll_to_bottom();
             self.md_cache.clear();
@@ -526,6 +532,7 @@ impl CommentPanel {
         let was_none = self.reply_view.is_none();
         self.reply_view = Some(text);
         self.reply_mode = mode;
+        self.cached_lines = None;
         if was_none {
             self.scroll.pending_bottom = true;
         }
@@ -533,6 +540,7 @@ impl CommentPanel {
 
     pub fn clear_reply_view(&mut self) {
         self.reply_view = None;
+        self.cached_lines = None;
     }
 
     pub fn close(&mut self) {
@@ -546,9 +554,22 @@ impl CommentPanel {
         self.panel_line = 0;
         self.scroll = ScrollState::new();
         self.md_cache.clear();
+        self.cached_lines = None;
     }
 
     pub fn build_lines(&mut self, colors: &DiffColors, viewport_height: usize, inner_width: usize, highlighter: Option<&crate::ui::highlight::Highlighter>) -> Vec<PanelLine> {
+        if let Some(ref cached) = self.cached_lines {
+            if self.cached_lines_width == inner_width {
+                return cached.clone();
+            }
+        }
+        let lines = self.build_lines_inner(colors, viewport_height, inner_width, highlighter);
+        self.cached_lines = Some(lines.clone());
+        self.cached_lines_width = inner_width;
+        lines
+    }
+
+    fn build_lines_inner(&mut self, colors: &DiffColors, viewport_height: usize, inner_width: usize, highlighter: Option<&crate::ui::highlight::Highlighter>) -> Vec<PanelLine> {
         let mut lines = Vec::new();
         let w = inner_width;
         let body_wrap_w = w.saturating_sub(1);
@@ -793,21 +814,24 @@ impl CommentPanel {
     }
 
     pub fn content_line_count(&self) -> usize {
+        if let Some(ref cached) = self.cached_lines {
+            return cached.len();
+        }
         let body_wrap_w = (self.width as usize).saturating_sub(2);
         let mut count = 0;
         if !self.file_path.is_empty() {
             count += wrap_text(&format!(" {}", self.file_path), self.width as usize).len();
         }
         if !self.diff_context.is_empty() {
-            count += self.diff_context.len() + 1; // context lines + separator
+            count += self.diff_context.len() + 1;
         }
-        count += 1; // blank before comments
+        count += 1;
         if self.resolved {
-            count += 2; // resolved label + blank
+            count += 2;
         }
         if !self.comments.is_empty() {
             for (i, c) in self.comments.iter().enumerate() {
-                count += 1; // author
+                count += 1;
                 if c.blocks.is_empty() && c.is_pending {
                     count += 1;
                 } else {
@@ -845,6 +869,7 @@ impl Default for CommentPanel {
     }
 }
 
+#[derive(Clone)]
 pub struct PanelLine {
     pub line: Line<'static>,
 }

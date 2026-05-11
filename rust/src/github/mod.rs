@@ -4,6 +4,16 @@ pub mod types;
 
 use anyhow::{Context, Result};
 
+fn format_octocrab_error(url: &str, err: octocrab::Error) -> anyhow::Error {
+    match err {
+        octocrab::Error::GitHub { source, .. } => {
+            anyhow::anyhow!("{} {}: {}", source.status_code.as_u16(), url, source.message)
+        }
+        other => anyhow::anyhow!("POST {url}: {other}"),
+    }
+}
+
+#[derive(Clone)]
 pub struct Client {
     octocrab: octocrab::Octocrab,
 }
@@ -194,10 +204,11 @@ impl Client {
         line: i32,
         side: &str,
     ) -> Result<types::ReviewComment> {
+        let url = format!("/repos/{owner}/{repo}/pulls/{number}/comments");
         let comment: types::ReviewComment = self
             .octocrab
             .post(
-                format!("/repos/{owner}/{repo}/pulls/{number}/comments"),
+                &url,
                 Some(&serde_json::json!({
                     "body": body,
                     "commit_id": commit_id,
@@ -207,7 +218,7 @@ impl Client {
                 })),
             )
             .await
-            .context("failed to create review comment")?;
+            .map_err(|e| anyhow::anyhow!("POST {url}: {e}"))?;
         Ok(comment)
     }
 
@@ -215,18 +226,16 @@ impl Client {
         &self,
         owner: &str,
         repo: &str,
-        number: u64,
+        _number: u64,
         comment_id: u64,
         body: &str,
     ) -> Result<types::ReviewComment> {
+        let url = format!("/repos/{owner}/{repo}/pulls/comments/{comment_id}/replies");
         let comment: types::ReviewComment = self
             .octocrab
-            .post(
-                format!("/repos/{owner}/{repo}/pulls/{number}/comments/{comment_id}/replies"),
-                Some(&serde_json::json!({ "body": body })),
-            )
+            .post(&url, Some(&serde_json::json!({ "body": body })))
             .await
-            .context("failed to reply to comment")?;
+            .map_err(|e| format_octocrab_error(&url, e))?;
         Ok(comment)
     }
 }

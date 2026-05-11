@@ -208,7 +208,8 @@ pub async fn handle_key(
 
         // Mode cycling
         KeyCode::Char('m') => {
-            local_diff.cycle_mode();
+            let is_default = local_diff.base_branch == local_diff.default_branch;
+            local_diff.cycle_mode(is_default);
             local_diff.load_diff();
         }
 
@@ -262,14 +263,32 @@ pub async fn handle_key(
 
         // Reply to existing comment thread
         KeyCode::Char('r') if !ctrl => {
-            if !local_diff.viewer.file_list.focused && !local_diff.viewer.render_list.is_empty() {
+            if local_diff.viewer.panel_focused && local_diff.viewer.panel.visible {
+                // Reply from the panel: use the panel's thread
+                if let Some(thread_key) = local_diff.viewer.panel.thread_key.clone() {
+                    let file_path = local_diff.viewer.panel.file_path.clone();
+                    let line = local_diff.viewer.panel.panel_line;
+                    let side = "RIGHT".to_string();
+                    let mode = if local_diff.comment_store.thread_has_copilot_comment(&thread_key) {
+                        crate::ui::diff_viewer::panel::ReplyMode::Copilot
+                    } else {
+                        crate::ui::diff_viewer::panel::ReplyMode::GitHub
+                    };
+                    local_diff.composing.start_reply_with_mode(thread_key, file_path, line, side, mode);
+                }
+            } else if !local_diff.viewer.file_list.focused && !local_diff.viewer.render_list.is_empty() {
                 let cursor = local_diff.viewer.scroll.cursor;
                 if let Some(badge) = local_diff.viewer.render_list.badge_at(cursor) {
                     let thread_key = badge.thread_key.clone();
                     let filename = local_diff.current_filename();
                     let line = badge.line;
                     let side = badge.side.clone();
-                    local_diff.composing.start_reply(thread_key.clone(), filename, line, side);
+                    let mode = if local_diff.comment_store.thread_has_copilot_comment(&thread_key) {
+                        crate::ui::diff_viewer::panel::ReplyMode::Copilot
+                    } else {
+                        crate::ui::diff_viewer::panel::ReplyMode::GitHub
+                    };
+                    local_diff.composing.start_reply_with_mode(thread_key.clone(), filename, line, side, mode);
                     local_diff.open_panel_for_thread(&thread_key);
                 }
             }
@@ -291,13 +310,25 @@ pub async fn handle_key(
             local_diff.viewer.panel_focused = false;
         }
 
-        // Resolve/unresolve thread
-        KeyCode::Char('x') if !ctrl && local_diff.viewer.panel.visible => {
-            if let Some(root_id) = local_diff.viewer.panel.thread_key.clone() {
-                let new_resolved = !local_diff.viewer.panel.resolved;
-                let _ = local_diff.comment_store.resolve(&root_id, new_resolved);
-                local_diff.viewer.panel.close();
-                local_diff.viewer.panel_focused = false;
+        // Resolve/unresolve thread (panel open or cursor on badge)
+        KeyCode::Char('x') if !ctrl => {
+            let thread_key = if local_diff.viewer.panel.visible {
+                local_diff.viewer.panel.thread_key.clone()
+            } else {
+                let cursor = local_diff.viewer.scroll.cursor;
+                local_diff.viewer.render_list.badge_at(cursor)
+                    .map(|b| b.thread_key.clone())
+            };
+            if let Some(root_id) = thread_key {
+                let currently_resolved = local_diff.comment_store.comments.iter()
+                    .find(|c| c.id == root_id)
+                    .map(|c| c.resolved)
+                    .unwrap_or(false);
+                let _ = local_diff.comment_store.resolve(&root_id, !currently_resolved);
+                if local_diff.viewer.panel.visible {
+                    local_diff.viewer.panel.close();
+                    local_diff.viewer.panel_focused = false;
+                }
                 let filename = local_diff.current_filename();
                 local_diff.place_file_comments(&filename);
             }
@@ -406,7 +437,7 @@ async fn handle_picker_key(local_diff: &mut LocalDiff, key: KeyEvent) {
                             local_diff.viewer.file_list.current_file_idx = idx;
                             local_diff.viewer.scroll.cursor = 0;
                             local_diff.viewer.scroll.offset = 0;
-                            local_diff.refresh_current_file().await;
+                            local_diff.refresh_current_file(false).await;
                             // Sync file list cursor to match
                             if let Some(entry_idx) = local_diff.viewer.file_list.entries.iter()
                                 .position(|e| !e.is_dir && e.file_index as usize == idx)
@@ -490,7 +521,7 @@ async fn select_tree_entry(local_diff: &mut LocalDiff) {
     local_diff.viewer.file_list.current_file_idx = file_idx;
     local_diff.viewer.scroll.cursor = 0;
     local_diff.viewer.scroll.offset = 0;
-    local_diff.refresh_current_file().await;
+    local_diff.refresh_current_file(false).await;
 }
 
 async fn stage_current_line(local_diff: &mut LocalDiff, repo_root: &str, unstage: bool) {
@@ -634,6 +665,9 @@ async fn handle_composing_key(
         KeyCode::Esc => {
             local_diff.composing.cancel();
             // Keep the panel open — just cancel the reply input
+        }
+        KeyCode::BackTab => {
+            local_diff.composing.toggle_reply_mode();
         }
         KeyCode::Enter => {
             if key.modifiers.contains(KeyModifiers::SHIFT)

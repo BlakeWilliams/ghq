@@ -4,6 +4,7 @@ use serde::Deserialize;
 
 const DEFAULT_COMMENT_PANEL_MIN_WIDTH: u16 = 40;
 const DEFAULT_DIFF_MIN_WIDTH: u16 = 80;
+const DEFAULT_SCROLL_MARGIN: usize = 5;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -13,6 +14,7 @@ pub struct Config {
     pub pr_prompt: Option<String>,
     pub comment_panel_min_width: u16,
     pub diff_min_width: u16,
+    pub scroll_margin: usize,
 }
 
 impl Default for Config {
@@ -23,6 +25,7 @@ impl Default for Config {
             pr_prompt: None,
             comment_panel_min_width: DEFAULT_COMMENT_PANEL_MIN_WIDTH,
             diff_min_width: DEFAULT_DIFF_MIN_WIDTH,
+            scroll_margin: DEFAULT_SCROLL_MARGIN,
         }
     }
 }

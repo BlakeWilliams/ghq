@@ -95,6 +95,15 @@ pub async fn staged_diff(dir: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// All changes (staged + unstaged) relative to HEAD.
+pub async fn working_diff(dir: &str) -> Result<String> {
+    let output = Command::new("git")
+        .args(["-C", dir, "diff", "HEAD"])
+        .output()
+        .await?;
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 pub async fn branch_diff(dir: &str) -> Result<String> {
     let default_branch = get_default_branch_via_gh(dir).await;
     let output = Command::new("git")

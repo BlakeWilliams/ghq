@@ -76,6 +76,8 @@ impl App {
         local_diff.default_branch = crate::git::default_branch_short(&repo_root)
             .await
             .unwrap_or_else(|_| "main".to_string());
+        local_diff.viewer.scroll.set_scroll_margin(config.scroll_margin);
+        local_diff.viewer.file_list.scroll.set_scroll_margin(config.scroll_margin);
         local_diff.github = Some(github.clone());
         local_diff.owner = owner.clone();
         local_diff.repo_name = repo.clone();
@@ -267,14 +269,16 @@ impl App {
                             // Handle $EDITOR request — suspend TUI, run editor, resume
                             if let Some(tmp_path) = self.editor_request.take() {
                                 Self::run_editor(terminal, &tmp_path);
-                                // Read edited content back into the commit overlay
-                                if let Ok(content) = std::fs::read_to_string(&tmp_path) {
-                                    if let Some(overlay) = &mut self.local_diff.commit_overlay {
+                                // Read edited content back into the active input
+                                if self.local_diff.composing.is_active() {
+                                    self.local_diff.composing.read_from_temp(&tmp_path);
+                                } else if let Some(overlay) = &mut self.local_diff.commit_overlay {
+                                    if let Ok(content) = std::fs::read_to_string(&tmp_path) {
                                         overlay.input = content.trim_end().to_string();
                                         overlay.cursor = overlay.input.len();
                                     }
+                                    let _ = std::fs::remove_file(&tmp_path);
                                 }
-                                let _ = std::fs::remove_file(&tmp_path);
                             }
 
                             redraw.notify_one();
@@ -408,16 +412,6 @@ impl App {
         }
         self.ctrl_c_count = 0;
 
-        // Quit — but not when composing, panel is focused, picker is open, or commit overlay active
-        if key.code == KeyCode::Char('q')
-            && !self.local_diff.composing.is_active()
-            && !self.local_diff.viewer.panel.visible
-            && self.local_diff.picker.is_none()
-            && self.local_diff.commit_overlay.is_none()
-        {
-            self.should_quit = true;
-            return;
-        }
 
         // Open command palette with `:`
         if key.code == KeyCode::Char(':')

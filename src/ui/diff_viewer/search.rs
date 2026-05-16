@@ -44,7 +44,8 @@ impl SearchState {
     }
 
     /// Update query and immediately re-run search. Smart-case: case-insensitive
-    /// unless the query contains an uppercase character.
+    /// unless the query contains an uppercase character. The query is treated as
+    /// a regex pattern — invalid patterns are silently ignored.
     pub fn set_query(&mut self, query: &str, render_list: &RenderList) {
         self.query = query.to_string();
         if query.is_empty() {
@@ -55,11 +56,10 @@ impl SearchState {
             return;
         }
         let has_upper = query.chars().any(|c| c.is_uppercase());
-        let escaped = regex::escape(query);
         self.pattern = if has_upper {
-            Regex::new(&escaped).ok()
+            Regex::new(query).ok()
         } else {
-            Regex::new(&format!("(?i){escaped}")).ok()
+            Regex::new(&format!("(?i){query}")).ok()
         };
         self.run_search(render_list);
     }

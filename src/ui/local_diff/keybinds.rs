@@ -16,8 +16,7 @@ pub async fn handle_key(
 ) -> Option<String> {
     // Composing mode: route all keys to the input buffer
     if local_diff.composing.is_active() {
-        handle_composing_key(local_diff, key, agent).await;
-        return None;
+        return handle_composing_key(local_diff, key, agent).await;
     }
 
     // Commit overlay: route all keys to the commit modal
@@ -369,7 +368,7 @@ pub async fn handle_key(
             }
         }
 
-        // Close panel with q (app.rs prevents quit when panel is visible)
+        // Close panel with q
         KeyCode::Char('q') if local_diff.viewer.panel.visible => {
             local_diff.viewer.panel.close();
             local_diff.viewer.panel_focused = false;
@@ -785,32 +784,61 @@ async fn handle_composing_key(
     local_diff: &mut LocalDiff,
     key: KeyEvent,
     agent: &Arc<dyn AgentRunner>,
-) {
+) -> Option<String> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Esc => {
             local_diff.composing.cancel();
-            // Keep the panel open — just cancel the reply input
         }
         KeyCode::BackTab => {
             local_diff.composing.toggle_reply_mode();
+        }
+        KeyCode::Char('g') if ctrl => {
+            let path = local_diff.composing.write_to_temp();
+            return Some(format!("open-editor:{path}"));
+        }
+        KeyCode::Char('a') if ctrl => {
+            local_diff.composing.move_home();
         }
         KeyCode::Enter => {
             if key.modifiers.contains(KeyModifiers::SHIFT)
                 || key.modifiers.contains(KeyModifiers::ALT)
             {
-                local_diff.composing.input.push('\n');
+                local_diff.composing.insert_newline();
             } else {
                 local_diff.submit_comment(agent).await;
             }
         }
         KeyCode::Backspace => {
-            local_diff.composing.input.pop();
+            local_diff.composing.delete_back();
+        }
+        KeyCode::Delete => {
+            local_diff.composing.delete_forward();
+        }
+        KeyCode::Left => {
+            local_diff.composing.move_left();
+        }
+        KeyCode::Right => {
+            local_diff.composing.move_right();
+        }
+        KeyCode::Up => {
+            local_diff.composing.move_up();
+        }
+        KeyCode::Down => {
+            local_diff.composing.move_down();
+        }
+        KeyCode::Home => {
+            local_diff.composing.move_home();
+        }
+        KeyCode::End => {
+            local_diff.composing.move_end();
         }
         KeyCode::Char(c) => {
-            local_diff.composing.input.push(c);
+            local_diff.composing.insert_char(c);
         }
         _ => {}
     }
+    None
 }
 
 async fn handle_commit_key(
@@ -942,6 +970,8 @@ async fn start_commit_flow(
     let is_pr = action == CommitAction::OpenPR;
     let agent = agent.clone();
 
+    let is_commit_all = action == CommitAction::CommitAll || action == CommitAction::CommitAllAndPush;
+
     tokio::spawn(async move {
         let prompt = if is_pr {
             let diff = crate::git::commit::branch_diff(&repo_root_owned)
@@ -951,6 +981,11 @@ async fn start_commit_flow(
                 .await
                 .unwrap_or_default();
             commit::build_pr_prompt(&diff, &log, &branch, None)
+        } else if is_commit_all {
+            let diff = crate::git::commit::working_diff(&repo_root_owned)
+                .await
+                .unwrap_or_default();
+            commit::build_commit_prompt(&diff, &branch, None)
         } else {
             let diff = crate::git::commit::staged_diff(&repo_root_owned)
                 .await

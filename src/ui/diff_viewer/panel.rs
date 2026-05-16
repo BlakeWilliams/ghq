@@ -452,6 +452,7 @@ pub struct CommentPanel {
     pub thread_key: Option<String>,
     pub comments: Vec<PanelComment>,
     pub reply_view: Option<String>,
+    pub reply_cursor: usize,
     pub reply_mode: ReplyMode,
     pub file_path: String,
     pub diff_context: Vec<Line<'static>>,
@@ -484,6 +485,7 @@ impl CommentPanel {
             thread_key: None,
             comments: Vec::new(),
             reply_view: None,
+            reply_cursor: 0,
             reply_mode: ReplyMode::Copilot,
             file_path: String::new(),
             diff_context: Vec::new(),
@@ -528,9 +530,10 @@ impl CommentPanel {
         self.visible && Self::panel_width(available_right) == 0
     }
 
-    pub fn set_reply_view(&mut self, text: String, mode: ReplyMode) {
+    pub fn set_reply_view(&mut self, text: String, cursor: usize, mode: ReplyMode) {
         let was_none = self.reply_view.is_none();
         self.reply_view = Some(text);
+        self.reply_cursor = cursor;
         self.reply_mode = mode;
         self.cached_lines = None;
         if was_none {
@@ -710,16 +713,79 @@ impl CommentPanel {
             ));
 
             if reply.is_empty() {
-                lines.push(PanelLine::text(" ▍"));
+                lines.push(PanelLine::rich(Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled("▍", Style::default().fg(Color::White)),
+                ])));
             } else {
-                let wrapped = wrap_text(reply, body_wrap_w);
-                for wl in &wrapped {
-                    lines.push(PanelLine::text(&format!(" {wl}")));
+                let cursor = self.reply_cursor.min(reply.len());
+                let before_cursor = &reply[..cursor];
+                let pre_lines: Vec<&str> = before_cursor.split('\n').collect();
+                let cursor_input_line = pre_lines.len() - 1;
+                let cursor_col_bytes = pre_lines.last().unwrap_or(&"").len();
+
+                let input_lines: Vec<&str> = reply.split('\n').collect();
+                let mut visual_line_idx = 0;
+                // Track which visual line gets the cursor
+                let mut cursor_visual_line = 0;
+                let mut cursor_visual_col = 0;
+
+                // First pass: figure out cursor visual position
+                for (i, iline) in input_lines.iter().enumerate() {
+                    let wrapped = wrap_text(iline, body_wrap_w);
+                    if i == cursor_input_line {
+                        let mut bytes_left = cursor_col_bytes;
+                        for (wi, wl) in wrapped.iter().enumerate() {
+                            if bytes_left <= wl.len() {
+                                cursor_visual_line = visual_line_idx + wi;
+                                cursor_visual_col = bytes_left;
+                                break;
+                            }
+                            bytes_left -= wl.len();
+                            // Skip whitespace consumed by wrapping
+                            let rest = &iline[cursor_col_bytes - bytes_left..];
+                            if rest.starts_with(' ') {
+                                bytes_left = bytes_left.saturating_sub(1);
+                            }
+                        }
+                    }
+                    visual_line_idx += wrapped.len();
                 }
-                if reply.ends_with('\n') {
-                    lines.push(PanelLine::text(" ▍"));
-                } else if let Some(last) = lines.last_mut() {
-                    last.line.spans.push(Span::raw("▍"));
+
+                // Second pass: render with cursor
+                visual_line_idx = 0;
+                for iline in &input_lines {
+                    let wrapped = wrap_text(iline, body_wrap_w);
+                    for wl in &wrapped {
+                        if visual_line_idx == cursor_visual_line {
+                            let before_part = &wl[..cursor_visual_col];
+                            let after_part = &wl[cursor_visual_col..];
+                            if after_part.is_empty() {
+                                lines.push(PanelLine::rich(Line::from(vec![
+                                    Span::raw(format!(" {before_part}")),
+                                    Span::styled("▍", Style::default().fg(Color::White)),
+                                ])));
+                            } else {
+                                let mut p = 1;
+                                while p < after_part.len() && !after_part.is_char_boundary(p) {
+                                    p += 1;
+                                }
+                                let cursor_char = &after_part[..p];
+                                let rest = &after_part[p..];
+                                lines.push(PanelLine::rich(Line::from(vec![
+                                    Span::raw(format!(" {before_part}")),
+                                    Span::styled(
+                                        cursor_char.to_string(),
+                                        Style::default().fg(Color::Black).bg(Color::White),
+                                    ),
+                                    Span::raw(rest.to_string()),
+                                ])));
+                            }
+                        } else {
+                            lines.push(PanelLine::text(&format!(" {wl}")));
+                        }
+                        visual_line_idx += 1;
+                    }
                 }
             }
 
@@ -736,12 +802,14 @@ impl CommentPanel {
     fn count_reply_lines(&self, reply: &str, body_wrap_w: usize) -> usize {
         // top border + content line(s) + bottom border
         if reply.is_empty() {
-            // cursor-only line
             2 + 1
         } else {
-            let wrapped = wrap_text(reply, body_wrap_w);
-            let extra = if reply.ends_with('\n') { 1 } else { 0 };
-            2 + wrapped.len() + extra
+            let input_lines: Vec<&str> = reply.split('\n').collect();
+            let mut count = 0;
+            for iline in &input_lines {
+                count += wrap_text(iline, body_wrap_w).len();
+            }
+            2 + count
         }
     }
 

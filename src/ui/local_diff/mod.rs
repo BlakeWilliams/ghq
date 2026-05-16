@@ -981,6 +981,7 @@ impl LocalDiff {
             }
             self.viewer.panel.set_reply_view(
                 self.composing.input.clone(),
+                self.composing.cursor,
                 self.composing.reply_mode,
             );
         } else {

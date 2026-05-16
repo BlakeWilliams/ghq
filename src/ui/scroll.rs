@@ -52,6 +52,8 @@ pub struct ScrollState {
     pub offset: usize,
     viewport_height: usize,
     total: usize,
+    /// Lines of padding between cursor and viewport edge.
+    scroll_margin: usize,
     /// When true, the next `clamp()` or `set_total()` will snap to the bottom.
     pub pending_bottom: bool,
 }
@@ -63,12 +65,17 @@ impl ScrollState {
             offset: 0,
             viewport_height: 0,
             total: 0,
+            scroll_margin: 0,
             pending_bottom: false,
         }
     }
 
     pub fn set_viewport_height(&mut self, h: usize) {
         self.viewport_height = h;
+    }
+
+    pub fn set_scroll_margin(&mut self, margin: usize) {
+        self.scroll_margin = margin;
     }
 
     pub fn viewport_height(&self) -> usize {
@@ -210,10 +217,18 @@ impl ScrollState {
         if self.viewport_height == 0 {
             return;
         }
-        if self.cursor < self.offset {
-            self.offset = self.cursor;
-        } else if self.cursor >= self.offset + self.viewport_height {
-            self.offset = self.cursor - self.viewport_height + 1;
+        // Effective margin: can't exceed half the viewport (otherwise cursor
+        // could never satisfy both top and bottom margin simultaneously).
+        let margin = self.scroll_margin.min(self.viewport_height / 2);
+        let max_offset = self.total.saturating_sub(self.viewport_height);
+
+        if self.cursor < self.offset + margin {
+            self.offset = self.cursor.saturating_sub(margin);
+        } else if self.cursor + margin >= self.offset + self.viewport_height {
+            self.offset = (self.cursor + margin + 1).saturating_sub(self.viewport_height);
+        }
+        if self.offset > max_offset {
+            self.offset = max_offset;
         }
     }
 

@@ -8,11 +8,12 @@ use ratatui::Frame;
 use tokio::sync::mpsc;
 
 use crate::agent::AgentRunner;
-use crate::agent::types::AgentEvent;
+use crate::agent::types::{AgentEvent, EventKind, EventPayload};
 use crate::git::diff::{self, DiffMode};
 use crate::github::CachedClient;
 use crate::github::types::{PullRequest, PullRequestFile, ReviewComment};
 use crate::review::comments::{CommentAuthor, CommentStore, ContentBlock, LocalComment, ToolEntry};
+use super::commit::{CommitEvent, CommitOverlay, COMMIT_GEN_PREFIX};
 use super::composing_state::ComposingState;
 use super::copilot_state::{CopilotState, CompletedReply, ToolCall, ToolGroup, ToolStatus};
 use super::diff_viewer::{DiffLineData, DiffViewer, LayoutInfo, LineType, TREE_WIDTH};
@@ -79,6 +80,9 @@ pub struct LocalDiff {
     pub pr: Option<PullRequest>,
     pub pr_loaded: bool,
     pub flash: super::flash::FlashState,
+    pub commit_overlay: Option<CommitOverlay>,
+    pub commit_tx: mpsc::UnboundedSender<CommitEvent>,
+    pub commit_rx: mpsc::UnboundedReceiver<CommitEvent>,
 }
 
 impl LocalDiff {
@@ -86,6 +90,7 @@ impl LocalDiff {
         let comment_store = CommentStore::new(&repo_root, "");
         let (highlight_tx, highlight_rx) = mpsc::unbounded_channel();
         let (github_tx, github_rx) = mpsc::unbounded_channel();
+        let (commit_tx, commit_rx) = mpsc::unbounded_channel();
         Self {
             viewer: DiffViewer::new(mode),
             repo_root,
@@ -111,6 +116,9 @@ impl LocalDiff {
             pr: None,
             pr_loaded: false,
             flash: super::flash::FlashState::new(),
+            commit_overlay: None,
+            commit_tx,
+            commit_rx,
         }
     }
 
@@ -203,7 +211,7 @@ impl LocalDiff {
     }
 
     /// Handle a GitHub event arriving from a background fetch.
-    pub async fn handle_github_event(&mut self, event: GithubEvent, github: &CachedClient, owner: &str, repo: &str) {
+    pub async fn handle_github_event(&mut self, event: GithubEvent, github: &CachedClient, _owner: &str, _repo: &str) {
         match event {
             GithubEvent::PrDetected(pr) => {
                 self.merge_base_ref = format!("origin/{}", pr.base.ref_name);
@@ -259,12 +267,11 @@ impl LocalDiff {
 
         // Close the comment panel when switching files, but keep it open
         // on reloads if it's showing a thread for the current file
-        if self.viewer.panel.visible && !preserve_panel {
-            if self.viewer.panel.file_path != filename {
+        if self.viewer.panel.visible && !preserve_panel
+            && self.viewer.panel.file_path != filename {
                 self.viewer.panel.close();
                 self.viewer.panel_focused = false;
             }
-        }
 
         let patch = self.viewer.file_list.files[idx].patch.clone();
         let diff_lines = parse_patch_to_diff_lines(&patch);
@@ -456,6 +463,12 @@ impl LocalDiff {
     }
 
     pub fn handle_agent_event(&mut self, event: AgentEvent) {
+        // Route commit-gen events to the commit overlay
+        if event.comment_id.starts_with(COMMIT_GEN_PREFIX) {
+            self.handle_commit_agent_event(event);
+            return;
+        }
+
         tracing::info!("Agent event: {:?} for comment {}", event.kind, event.comment_id);
         let comment_id = event.comment_id.clone();
         if let Some(reply) = self.copilot_state.handle_event(event) {
@@ -467,6 +480,44 @@ impl LocalDiff {
             self.place_file_comments(&filename);
         } else {
             self.refresh_panel_streaming(&comment_id);
+        }
+    }
+
+    fn handle_commit_agent_event(&mut self, event: AgentEvent) {
+        let overlay = match &mut self.commit_overlay {
+            Some(o) => o,
+            None => return,
+        };
+
+        match event.kind {
+            EventKind::Delta => {
+                if let EventPayload::Delta(d) = &event.payload {
+                    overlay.append_token(&d.text);
+                }
+            }
+            EventKind::Done => {
+                overlay.finish_generation();
+            }
+            EventKind::Error => {
+                if let EventPayload::Error(e) = &event.payload {
+                    self.flash.error(format!("AI generation failed: {}", e.message));
+                }
+                overlay.generation_error();
+            }
+            _ => {}
+        }
+    }
+
+    pub fn handle_commit_result(&mut self, event: CommitEvent) {
+        self.commit_overlay = None;
+        match event {
+            CommitEvent::Success(msg) => {
+                self.flash.success(msg);
+                self.reload_diff();
+            }
+            CommitEvent::Error(msg) => {
+                self.flash.error(msg);
+            }
         }
     }
 
@@ -661,6 +712,9 @@ impl LocalDiff {
     }
 
     pub fn tick(&mut self) {
+        if let Some(overlay) = &mut self.commit_overlay {
+            overlay.tick();
+        }
         if self.copilot_state.has_pending() {
             self.copilot_state.advance_dots();
             self.viewer.dots_frame = self.viewer.dots_frame.wrapping_add(1);
@@ -762,7 +816,7 @@ impl LocalDiff {
                 tokio::spawn(async move {
                     match github.create_review_comment(
                         &owner, &repo, pr_number, &body_clone, &commit_id,
-                        &path_clone, line as i32, &side_clone,
+                        &path_clone, line, &side_clone,
                     ).await {
                         Ok(_comment) => {
                             tracing::info!("Posted new review comment on {path_clone}:{line}");
@@ -973,6 +1027,11 @@ impl LocalDiff {
                 .render(frame, area);
         }
 
+        // Commit overlay (rendered on top of picker and diff)
+        if let Some(overlay) = &self.commit_overlay {
+            overlay.render(frame, area, colors.border_fg);
+        }
+
         // Flash notifications (top-right, rendered last so they're on top)
         self.flash.gc();
         self.flash.render(frame, area);
@@ -1028,6 +1087,7 @@ impl LocalDiff {
                 _ => {}
             }
             hints.push(h("m", "mode"));
+            hints.push(h("C", "commit/push"));
         } else {
             hints.push(h("j/k", "navigate tree"));
             hints.push(h("↵", "open file"));

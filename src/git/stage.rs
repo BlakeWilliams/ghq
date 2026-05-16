@@ -123,7 +123,7 @@ fn build_partial_patch(
     let mut new_num = 0i32;
     let mut in_hunk = false;
 
-    let mut flush_hunk = |hunks: &mut Vec<String>, current_hunk: &mut Vec<String>,
+    let flush_hunk = |hunks: &mut Vec<String>, current_hunk: &mut Vec<String>,
                           old_start: i32, old_count: i32, new_start: i32, new_count: i32| {
         if current_hunk.is_empty() {
             return;

@@ -467,7 +467,7 @@ impl DiffViewer {
                 );
             } else {
                 // Normal mode: render diff content or empty state
-                let diff_line = if self.file_list.files.is_empty() && self.render_list.len() == 0 {
+                let diff_line = if self.file_list.files.is_empty() && self.render_list.is_empty() {
                     let mid = vp_h / 2;
                     if row == mid {
                         let msg = if self.file_list.loaded {

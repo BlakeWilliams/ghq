@@ -1,5 +1,6 @@
 pub mod app;
 pub mod chat;
+pub mod commit;
 pub mod components;
 pub mod composing_state;
 pub mod copilot_state;

@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments, clippy::large_enum_variant)]
+
 mod config;
 mod error;
 

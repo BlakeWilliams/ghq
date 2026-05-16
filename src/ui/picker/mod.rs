@@ -1,3 +1,5 @@
+use std::cmp::Reverse;
+
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
@@ -72,7 +74,7 @@ impl Picker {
             })
             .collect();
 
-        scored.sort_by(|a, b| b.score.cmp(&a.score));
+        scored.sort_by_key(|a| Reverse(a.score));
         self.filtered = scored;
     }
 

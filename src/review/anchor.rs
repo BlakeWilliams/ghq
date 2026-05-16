@@ -106,9 +106,5 @@ fn normalize_ws(s: &str) -> String {
 }
 
 fn side_compatible(side: &str, kind: &str) -> bool {
-    match (side, kind) {
-        ("LEFT", "-") => true,
-        ("RIGHT", "+") | ("RIGHT", " ") => true,
-        _ => false,
-    }
+    matches!((side, kind), ("LEFT", "-") | ("RIGHT", "+") | ("RIGHT", " "))
 }

@@ -97,12 +97,8 @@ fn ensure_contrast(fg: (u8, u8, u8), bg: (u8, u8, u8)) -> (u8, u8, u8) {
 
 /// Lualine's brightness_modifier: channel = clamp(channel + channel * pct / 100).
 fn brightness_modify(r: u8, g: u8, b: u8, pct: f64) -> (u8, u8, u8) {
-    let clamp = |v: f64| -> u8 { v.round().max(0.0).min(255.0) as u8 };
-    (
-        clamp(r as f64 + r as f64 * pct / 100.0),
-        clamp(g as f64 + g as f64 * pct / 100.0),
-        clamp(b as f64 + b as f64 * pct / 100.0),
-    )
+    let modify = |v: u8| -> u8 { (v as f64 + v as f64 * pct / 100.0).round().clamp(0.0, 255.0) as u8 };
+    (modify(r), modify(g), modify(b))
 }
 
 fn or_default(c: Option<(u8, u8, u8)>, fallback: (u8, u8, u8)) -> (u8, u8, u8) {

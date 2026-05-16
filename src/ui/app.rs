@@ -52,6 +52,8 @@ pub struct App {
     /// Suppress key events until this instant to discard stale OSC responses
     /// that crossterm parsed as garbage key events before drain_stdin ran.
     suppress_keys_until: Option<std::time::Instant>,
+    /// Temp file path for $EDITOR — set by ctrl+g in commit overlay.
+    editor_request: Option<String>,
 }
 
 impl App {
@@ -96,6 +98,7 @@ impl App {
             ctrl_c_count: 0,
             diff_rx,
             suppress_keys_until: None,
+            editor_request: None,
         }
     }
 
@@ -233,7 +236,8 @@ impl App {
 
         loop {
             let needs_animation = self.local_diff.copilot_state.has_pending()
-                || !self.local_diff.flash.is_empty();
+                || !self.local_diff.flash.is_empty()
+                || self.local_diff.commit_overlay.is_some();
 
             tokio::select! {
                 biased;
@@ -259,6 +263,20 @@ impl App {
                     match term_event {
                         Some(Ok(ev)) => {
                             self.handle_event(ev).await;
+
+                            // Handle $EDITOR request — suspend TUI, run editor, resume
+                            if let Some(tmp_path) = self.editor_request.take() {
+                                Self::run_editor(terminal, &tmp_path);
+                                // Read edited content back into the commit overlay
+                                if let Ok(content) = std::fs::read_to_string(&tmp_path) {
+                                    if let Some(overlay) = &mut self.local_diff.commit_overlay {
+                                        overlay.input = content.trim_end().to_string();
+                                        overlay.cursor = overlay.input.len();
+                                    }
+                                }
+                                let _ = std::fs::remove_file(&tmp_path);
+                            }
+
                             redraw.notify_one();
                         }
                         Some(Err(e)) => {
@@ -334,6 +352,13 @@ impl App {
                         redraw.notify_one();
                     }
                 }
+
+                commit_result = self.local_diff.commit_rx.recv() => {
+                    if let Some(event) = commit_result {
+                        self.local_diff.handle_commit_result(event);
+                        redraw.notify_one();
+                    }
+                }
             }
         }
 
@@ -383,11 +408,12 @@ impl App {
         }
         self.ctrl_c_count = 0;
 
-        // Quit — but not when composing, panel is focused, or picker is open
+        // Quit — but not when composing, panel is focused, picker is open, or commit overlay active
         if key.code == KeyCode::Char('q')
             && !self.local_diff.composing.is_active()
             && !self.local_diff.viewer.panel.visible
             && self.local_diff.picker.is_none()
+            && self.local_diff.commit_overlay.is_none()
         {
             self.should_quit = true;
             return;
@@ -398,6 +424,7 @@ impl App {
             && !self.local_diff.composing.is_active()
             && self.local_diff.picker.is_none()
             && !self.local_diff.viewer.search.active
+            && self.local_diff.commit_overlay.is_none()
         {
             keybinds::open_command_palette(&mut self.local_diff);
             return;
@@ -414,6 +441,12 @@ impl App {
     }
 
     async fn handle_command(&mut self, name: &str, _args: &[String]) {
+        // Handle open-editor:path commands from the commit overlay
+        if let Some(path) = name.strip_prefix("open-editor:") {
+            self.editor_request = Some(path.to_string());
+            return;
+        }
+
         match name {
             "quit" | "q" => {
                 self.should_quit = true;
@@ -456,10 +489,44 @@ impl App {
                     }
                 }
             }
+            "commit" => {
+                keybinds::open_commit_picker(&mut self.local_diff, &self.repo_root).await;
+            }
             _ => {
                 self.local_diff.flash.error("Unknown command: ".to_string() + name);
             }
         }
+    }
+
+    /// Suspend the TUI, run $EDITOR on the given file, then resume.
+    fn run_editor(
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        file_path: &str,
+    ) {
+        // Leave alternate screen and raw mode so the editor gets a clean terminal
+        let _ = execute!(
+            terminal.backend_mut(),
+            crossterm::event::DisableMouseCapture,
+            LeaveAlternateScreen,
+            cursor::Show
+        );
+        let _ = disable_raw_mode();
+
+        let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nvim".to_string());
+        let _ = std::process::Command::new(&editor)
+            .arg(file_path)
+            .status();
+
+        // Re-enter TUI mode
+        let _ = enable_raw_mode();
+        let _ = execute!(
+            terminal.backend_mut(),
+            EnterAlternateScreen,
+            crossterm::event::EnableMouseCapture,
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+            cursor::Hide
+        );
+        let _ = terminal.clear();
     }
 
     fn handle_mouse(&mut self, mouse: event::MouseEvent) {

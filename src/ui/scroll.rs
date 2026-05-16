@@ -201,6 +201,11 @@ impl ScrollState {
         (thumb_start, thumb_len)
     }
 
+    /// Adjust viewport offset so the cursor is visible.
+    pub fn ensure_visible(&mut self) {
+        self.sync_viewport();
+    }
+
     fn sync_viewport(&mut self) {
         if self.viewport_height == 0 {
             return;

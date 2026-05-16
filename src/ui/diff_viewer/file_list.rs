@@ -55,6 +55,7 @@ impl FileList {
     pub fn set_cursor(&mut self, pos: usize) {
         self.scroll.cursor = pos;
         self.scroll.set_total(self.entries.len());
+        self.scroll.ensure_visible();
     }
 
     pub fn set_files(&mut self, files: Vec<PullRequestFile>) -> ResetCursor {

@@ -3,6 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::agent::AgentRunner;
 use crate::git::diff::DiffMode;
+use crate::ui::commit::{self, CommitAction, CommitKeyResult, CommitOverlay, COMMIT_GEN_PREFIX};
 use crate::ui::picker::{Picker, PickerItem};
 use crate::ui::scroll::Scrollable;
 use super::LocalDiff;
@@ -19,6 +20,11 @@ pub async fn handle_key(
         return None;
     }
 
+    // Commit overlay: route all keys to the commit modal
+    if local_diff.commit_overlay.is_some() {
+        return handle_commit_key(local_diff, key, repo_root, agent).await;
+    }
+
     // Search input mode: route keys to search query
     if local_diff.viewer.search.active {
         handle_search_key(local_diff, key);
@@ -27,7 +33,7 @@ pub async fn handle_key(
 
     // Picker mode: route keys to picker
     if local_diff.picker.is_some() {
-        return handle_picker_key(local_diff, key).await;
+        return handle_picker_key(local_diff, key, repo_root, agent).await;
     }
 
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -269,7 +275,7 @@ pub async fn handle_key(
         KeyCode::Char('m') => {
             let is_default = local_diff.base_branch == local_diff.default_branch;
             local_diff.cycle_mode(is_default);
-            local_diff.load_diff();
+            local_diff.reload_diff();
         }
 
         // Staging
@@ -411,6 +417,11 @@ pub async fn handle_key(
             open_help_palette(local_diff);
         }
 
+        // Commit picker (C)
+        KeyCode::Char('C') if !ctrl => {
+            open_commit_picker(local_diff, repo_root).await;
+        }
+
         _ => {}
     }
     None
@@ -425,6 +436,7 @@ pub fn open_command_palette(local_diff: &mut LocalDiff) {
 
     let items = vec![
         cmd("refresh", "Reload diff from disk"),
+        cmd("commit", "Commit, push, or open PR"),
         cmd("view-on-github", "Open PR in browser"),
         cmd("set-merge-base", "Choose merge base branch"),
         cmd("quit", "Quit the application"),
@@ -447,6 +459,7 @@ fn open_help_palette(local_diff: &mut LocalDiff) {
 
     let items = vec![
         cmd("refresh", "Reload diff from disk"),
+        cmd("commit", "Commit, push, or open PR"),
         cmd("view-on-github", "Open PR in browser"),
         cmd("set-merge-base", "Choose merge base branch"),
         cmd("quit", "Quit the application"),
@@ -462,6 +475,7 @@ fn open_help_palette(local_diff: &mut LocalDiff) {
         key(":", "Command palette"),
         key("s/u", "Stage/unstage line"),
         key("S/U", "Stage/unstage hunk"),
+        key("C", "Commit/push/PR"),
         key("c", "Ask Copilot about hunk"),
         key("r", "Reply to comment"),
         key("x", "Resolve/unresolve thread"),
@@ -513,7 +527,7 @@ fn incsearch_jump(local_diff: &mut LocalDiff) {
     }
 }
 
-async fn handle_picker_key(local_diff: &mut LocalDiff, key: KeyEvent) -> Option<String> {
+async fn handle_picker_key(local_diff: &mut LocalDiff, key: KeyEvent, repo_root: &str, agent: &Arc<dyn AgentRunner>) -> Option<String> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Esc => {
@@ -547,6 +561,9 @@ async fn handle_picker_key(local_diff: &mut LocalDiff, key: KeyEvent) -> Option<
                         local_diff.merge_base_ref = item.value.clone();
                         local_diff.mode = DiffMode::Branch;
                         local_diff.load_diff();
+                    }
+                    "commit" => {
+                        start_commit_flow(local_diff, &item.value, repo_root, agent).await;
                     }
                     "command" => {
                         if let Some(cmd) = item.value.strip_prefix("cmd:") {
@@ -794,4 +811,166 @@ async fn handle_composing_key(
         }
         _ => {}
     }
+}
+
+async fn handle_commit_key(
+    local_diff: &mut LocalDiff,
+    key: KeyEvent,
+    repo_root: &str,
+    _agent: &Arc<dyn AgentRunner>,
+) -> Option<String> {
+    let overlay = match &mut local_diff.commit_overlay {
+        Some(o) => o,
+        None => return None,
+    };
+
+    match overlay.handle_key(key) {
+        CommitKeyResult::Continue => {}
+        CommitKeyResult::Cancel => {
+            local_diff.commit_overlay = None;
+        }
+        CommitKeyResult::Execute => {
+            let action = overlay.action;
+            let message = overlay.input.clone();
+            let repo_root = repo_root.to_string();
+            let tx = local_diff.commit_tx.clone();
+            tokio::spawn(async move {
+                commit::execute_commit_action(action, &message, &repo_root, tx).await;
+            });
+        }
+        CommitKeyResult::OpenEditor(path) => {
+            return Some(format!("open-editor:{path}"));
+        }
+    }
+    None
+}
+
+pub async fn open_commit_picker(local_diff: &mut LocalDiff, repo_root: &str) {
+    use crate::git::commit as git_commit;
+
+    let has_staged = git_commit::has_staged_changes(repo_root).await;
+    let has_unstaged = git_commit::has_unstaged_changes(repo_root).await;
+    let has_unpushed = git_commit::has_unpushed_commits(repo_root).await;
+    let has_pr = git_commit::has_open_pr(repo_root).await;
+
+    let mut items = Vec::new();
+
+    if has_staged {
+        items.push(PickerItem {
+            label: "Commit".into(),
+            description: "Commit staged changes".into(),
+            value: "Commit".into(),
+        });
+        items.push(PickerItem {
+            label: "Commit & Push".into(),
+            description: "Commit and push to remote".into(),
+            value: "CommitAndPush".into(),
+        });
+    }
+
+    if has_unstaged {
+        items.push(PickerItem {
+            label: "Commit All".into(),
+            description: "Stage all and commit".into(),
+            value: "CommitAll".into(),
+        });
+        items.push(PickerItem {
+            label: "Commit All & Push".into(),
+            description: "Stage all, commit, and push".into(),
+            value: "CommitAllAndPush".into(),
+        });
+    }
+
+    if has_unpushed || has_staged {
+        items.push(PickerItem {
+            label: "Push".into(),
+            description: "Push commits to remote".into(),
+            value: "Push".into(),
+        });
+    }
+
+    if !has_pr {
+        items.push(PickerItem {
+            label: "Open PR".into(),
+            description: "Create a pull request".into(),
+            value: "OpenPR".into(),
+        });
+    }
+
+    if items.is_empty() {
+        local_diff.flash.error("Nothing to commit, push, or PR".to_string());
+        return;
+    }
+
+    local_diff.picker = Some(Picker::new("Git", items));
+    local_diff.picker_kind = "commit".to_string();
+}
+
+async fn start_commit_flow(
+    local_diff: &mut LocalDiff,
+    action_str: &str,
+    repo_root: &str,
+    agent: &Arc<dyn AgentRunner>,
+) {
+    let action = match action_str {
+        "Commit" => CommitAction::Commit,
+        "CommitAndPush" => CommitAction::CommitAndPush,
+        "Push" => CommitAction::Push,
+        "OpenPR" => CommitAction::OpenPR,
+        "CommitAll" => CommitAction::CommitAll,
+        "CommitAllAndPush" => CommitAction::CommitAllAndPush,
+        _ => return,
+    };
+
+    let overlay = CommitOverlay::new(action);
+
+    // Push: execute immediately, no message needed
+    if action == CommitAction::Push {
+        let repo_root = repo_root.to_string();
+        let tx = local_diff.commit_tx.clone();
+        tokio::spawn(async move {
+            commit::execute_commit_action(CommitAction::Push, "", &repo_root, tx).await;
+        });
+        local_diff.commit_overlay = Some(overlay);
+        return;
+    }
+
+    // For actions needing a message, start AI generation
+    let gen_id = format!("{COMMIT_GEN_PREFIX}-{}", uuid_v4_short());
+    let repo_root_owned = repo_root.to_string();
+    let branch = local_diff.base_branch.clone();
+    let is_pr = action == CommitAction::OpenPR;
+    let agent = agent.clone();
+
+    tokio::spawn(async move {
+        let prompt = if is_pr {
+            let diff = crate::git::commit::branch_diff(&repo_root_owned)
+                .await
+                .unwrap_or_default();
+            let log = crate::git::commit::branch_log(&repo_root_owned)
+                .await
+                .unwrap_or_default();
+            commit::build_pr_prompt(&diff, &log, &branch, None)
+        } else {
+            let diff = crate::git::commit::staged_diff(&repo_root_owned)
+                .await
+                .unwrap_or_default();
+            commit::build_commit_prompt(&diff, &branch, None)
+        };
+
+        if let Err(e) = agent.send(&gen_id, &prompt).await {
+            tracing::error!("Failed to start AI generation: {e}");
+        }
+    });
+
+    local_diff.commit_overlay = Some(overlay);
+}
+
+fn uuid_v4_short() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{t:x}")
 }

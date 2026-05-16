@@ -13,18 +13,21 @@ const PADDING: u16 = 2;
 
 #[derive(Clone)]
 pub enum FlashLevel {
+    Success,
     Error,
 }
 
 impl FlashLevel {
     fn border_color(&self) -> Color {
         match self {
+            FlashLevel::Success => Color::Green,
             FlashLevel::Error => Color::Red,
         }
     }
 
     fn icon(&self) -> &'static str {
         match self {
+            FlashLevel::Success => "✓",
             FlashLevel::Error => "✗",
         }
     }
@@ -45,6 +48,14 @@ impl FlashState {
         Self {
             flashes: Vec::new(),
         }
+    }
+
+    pub fn success(&mut self, message: impl Into<String>) {
+        self.flashes.push(Flash {
+            message: message.into(),
+            level: FlashLevel::Success,
+            created_at: Instant::now(),
+        });
     }
 
     pub fn error(&mut self, message: impl Into<String>) {

@@ -32,8 +32,8 @@ impl RepoWatcher {
         let shutdown = Arc::new(Notify::new());
 
         let git_dir = repo_root.join(".git");
-        let head_file = git_dir.join("HEAD");
-        let refs_heads = git_dir.join("refs").join("heads");
+        let _head_file = git_dir.join("HEAD");
+        let _refs_heads = git_dir.join("refs").join("heads");
         let repo_for_filter = repo_root.clone();
         let shutdown_clone = shutdown.clone();
 

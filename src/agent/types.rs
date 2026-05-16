@@ -32,7 +32,6 @@ pub struct DeltaPayload {
 pub struct ToolPayload {
     pub tool_name: String,
     pub args_summary: String,
-    pub result: Option<String>,
 }
 
 #[derive(Debug, Clone)]

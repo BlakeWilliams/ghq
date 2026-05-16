@@ -19,7 +19,6 @@ const COLORS: ColorConstants = ColorConstants {
 
 struct BlendFactors {
     selection: f64,
-    dim: f64,
     add_bg: f64,
     add_selected: f64,
     del_bg: f64,
@@ -32,7 +31,6 @@ struct BlendFactors {
 
 const BLEND: BlendFactors = BlendFactors {
     selection: 0.12,
-    dim: 0.35,
     add_bg: 0.08,
     add_selected: 0.25,
     del_bg: 0.08,
@@ -60,11 +58,8 @@ pub struct DiffColors {
     pub selected_hunk_bg: Color,
     pub search_match_bg: Color,
     pub search_current_bg: Color,
-    pub search_match_fg: Color,
-    pub selection_bg: Color,
     pub border_fg: Color,
     pub chrome_fg: Color,
-    pub palette_dim: Color,
 }
 
 /// Alpha blend: result = fg*alpha + bg*(1-alpha)
@@ -130,9 +125,6 @@ impl DiffColors {
         let chrome_pct = if bg_lum < 0.5 { 40.0 } else { -20.0 };
         let chrome = brightness_modify(bg.0, bg.1, bg.2, chrome_pct);
 
-        // Dim color for dimmed text (safe on both light/dark)
-        let dim = blend(select_tint, bg, BLEND.dim);
-
         // Add colors
         let (add_fg_c, add_bg_c, selected_add_bg_c) = if let Some(g) = green {
             let add_bg = blend(g, bg, BLEND.add_bg);
@@ -165,16 +157,11 @@ impl DiffColors {
             };
 
         // Search match: palette yellow bg, luminance-based fg
-        let (search_bg, search_current, search_fg) = if let Some(y) = yellow {
-            let fg = if relative_luminance(y) > 0.4 {
-                COLORS.black
-            } else {
-                COLORS.white
-            };
+        let (search_bg, search_current) = if let Some(y) = yellow {
             let current = blend(y, COLORS.white, BLEND.search_current);
-            (rgb(y), rgb(current), rgb(fg))
+            (rgb(y), rgb(current))
         } else {
-            (Color::Yellow, Color::LightYellow, Color::Black)
+            (Color::Yellow, Color::LightYellow)
         };
 
         Self {
@@ -193,11 +180,8 @@ impl DiffColors {
             selected_hunk_bg: selected_hunk_bg_c,
             search_match_bg: search_bg,
             search_current_bg: search_current,
-            search_match_fg: search_fg,
-            selection_bg: Color::DarkGray,
             border_fg: rgb(border),
             chrome_fg: rgb(chrome),
-            palette_dim: rgb(dim),
         }
     }
 }
@@ -223,11 +207,8 @@ impl Default for DiffColors {
             selected_hunk_bg: Color::DarkGray,
             search_match_bg: Color::Yellow,
             search_current_bg: Color::LightYellow,
-            search_match_fg: Color::Black,
-            selection_bg: Color::DarkGray,
             border_fg: Color::DarkGray,
             chrome_fg: Color::DarkGray,
-            palette_dim: Color::DarkGray,
         }
     }
 }

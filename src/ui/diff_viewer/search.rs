@@ -76,7 +76,7 @@ impl SearchState {
         };
 
         for (idx, item) in render_list.items().iter().enumerate() {
-            if let RenderItem::DiffLine(dl) = item {
+            let RenderItem::DiffLine(dl) = item; {
                 if dl.line_type == LineType::HunkHeader {
                     continue;
                 }
@@ -163,9 +163,6 @@ impl SearchState {
         self.matches.len()
     }
 
-    pub fn has_pattern(&self) -> bool {
-        self.pattern.is_some()
-    }
 }
 
 impl Default for SearchState {
@@ -266,9 +263,9 @@ mod tests {
         let mut s = SearchState::new();
         s.start(0, 0);
         s.set_query("hello", &rl);
-        assert!(s.has_pattern());
+        assert!(s.pattern.is_some());
         s.cancel();
-        assert!(!s.has_pattern());
+        assert!(!s.pattern.is_some());
         assert!(s.matches.is_empty());
     }
 
@@ -280,7 +277,7 @@ mod tests {
         assert_eq!(s.matches.len(), 1);
         s.set_query("", &rl);
         assert!(s.matches.is_empty());
-        assert!(!s.has_pattern());
+        assert!(!s.pattern.is_some());
     }
 
     #[test]
@@ -300,11 +297,11 @@ mod tests {
         s.start(0, 0);
         s.set_query("hello", &rl);
         assert!(s.active);
-        assert!(s.has_pattern());
+        assert!(s.pattern.is_some());
 
         s.confirm();
         assert!(!s.active);
-        assert!(s.has_pattern());
+        assert!(s.pattern.is_some());
         assert_eq!(s.matches.len(), 1);
     }
 
@@ -385,13 +382,13 @@ mod tests {
 
         // clear keeps origin (it's not "undoing" the search start)
         s.clear();
-        assert!(!s.has_pattern());
+        assert!(!s.pattern.is_some());
         assert!(s.matches.is_empty());
 
         // cancel also clears pattern
         s.set_query("hello", &rl);
         s.cancel();
         assert!(!s.active);
-        assert!(!s.has_pattern());
+        assert!(!s.pattern.is_some());
     }
 }

@@ -4,7 +4,6 @@ use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
 pub struct Picker {
-    pub visible: bool,
     pub query: String,
     pub items: Vec<PickerItem>,
     pub filtered: Vec<FilteredItem>,
@@ -29,7 +28,6 @@ pub struct FilteredItem {
 impl Picker {
     pub fn new(title: &str, items: Vec<PickerItem>) -> Self {
         let mut picker = Self {
-            visible: true,
             query: String::new(),
             items,
             filtered: Vec::new(),

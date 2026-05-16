@@ -54,17 +54,6 @@ pub fn body_from_blocks(blocks: &[ContentBlock]) -> String {
     parts.join("\n").trim().to_string()
 }
 
-/// Normalize blocks: if non-empty return as-is, otherwise synthesize from body.
-pub fn normalized_blocks(blocks: Vec<ContentBlock>, body: &str) -> Vec<ContentBlock> {
-    if !blocks.is_empty() {
-        return blocks;
-    }
-    if !body.is_empty() {
-        return vec![ContentBlock::Text(body.to_string())];
-    }
-    Vec::new()
-}
-
 pub struct PendingReply {
     pub blocks: Vec<ContentBlock>,
     pub intent: String,
@@ -80,7 +69,6 @@ pub struct CompletedReply {
     pub path: String,
     pub line: i32,
     pub side: String,
-    pub is_error: bool,
 }
 
 pub struct CopilotState {
@@ -113,20 +101,8 @@ impl CopilotState {
         !self.pending.is_empty()
     }
 
-    pub fn is_pending(&self, comment_id: &str) -> bool {
-        self.pending.contains_key(comment_id)
-    }
-
     pub fn pending_ids(&self) -> impl Iterator<Item = &str> {
         self.pending.keys().map(|s| s.as_str())
-    }
-
-    pub fn blocks(&self, comment_id: &str) -> Option<&[ContentBlock]> {
-        self.pending.get(comment_id).map(|p| p.blocks.as_slice())
-    }
-
-    pub fn intent(&self, comment_id: &str) -> Option<&str> {
-        self.pending.get(comment_id).map(|p| p.intent.as_str())
     }
 
     pub fn advance_dots(&mut self) {
@@ -266,7 +242,6 @@ impl CopilotState {
                     path: pending.path,
                     line: pending.line,
                     side: pending.side,
-                    is_error: false,
                 })
             }
             EventKind::Error => {
@@ -286,7 +261,6 @@ impl CopilotState {
                     path,
                     line,
                     side,
-                    is_error: true,
                 })
             }
         }
@@ -327,10 +301,11 @@ mod tests {
         });
         assert!(result.is_none());
 
-        let blocks = state.blocks("c1").unwrap();
-        assert_eq!(blocks.len(), 1);
+        let blocks = state.pending_display_blocks("c1").unwrap();
+        // pending_display_blocks appends dots, so check first block text starts with "Hello world"
+        assert!(blocks.len() >= 1);
         match &blocks[0] {
-            ContentBlock::Text(t) => assert_eq!(t, "Hello world"),
+            ContentBlock::Text(t) => assert!(t.starts_with("Hello world"), "got: {t}"),
             _ => panic!("expected TextBlock"),
         }
     }
@@ -361,9 +336,8 @@ mod tests {
         assert_eq!(reply.path, "file.rs");
         assert_eq!(reply.line, 5);
         assert_eq!(reply.side, "LEFT");
-        assert!(!reply.is_error);
 
-        assert!(!state.is_pending("c1"));
+        assert!(!state.has_pending());
     }
 
     #[test]
@@ -382,8 +356,7 @@ mod tests {
             .expect("should produce reply");
 
         assert_eq!(reply.body, "⚠ timeout");
-        assert!(reply.is_error);
-        assert!(!state.is_pending("c1"));
+        assert!(!state.has_pending());
     }
 
     #[test]
@@ -397,7 +370,7 @@ mod tests {
             }),
         });
         assert!(result.is_none());
-        assert!(state.blocks("unknown").is_none());
+        assert!(state.pending_display_blocks("unknown").is_none());
     }
 
     #[test]
@@ -412,7 +385,6 @@ mod tests {
             payload: EventPayload::Tool(ToolPayload {
                 tool_name: "read_file".into(),
                 args_summary: "main.rs".into(),
-                result: None,
             }),
         });
         // Tool complete
@@ -422,7 +394,6 @@ mod tests {
             payload: EventPayload::Tool(ToolPayload {
                 tool_name: "read_file".into(),
                 args_summary: String::new(),
-                result: None,
             }),
         });
         // Text delta
@@ -440,12 +411,12 @@ mod tests {
             payload: EventPayload::Tool(ToolPayload {
                 tool_name: "apply_edit".into(),
                 args_summary: "main.rs".into(),
-                result: None,
             }),
         });
 
-        let blocks = state.blocks("c1").unwrap();
-        assert_eq!(blocks.len(), 3); // ToolGroup, Text, ToolGroup
+        let blocks = state.pending_display_blocks("c1").unwrap();
+        // pending_display_blocks appends dots to last text block, so we have 3+ blocks
+        assert!(blocks.len() >= 3); // ToolGroup, Text, ToolGroup (with dots)
         assert!(matches!(&blocks[0], ContentBlock::ToolGroup(_)));
         assert!(matches!(&blocks[1], ContentBlock::Text(t) if t == "Here is the fix."));
         assert!(matches!(&blocks[2], ContentBlock::ToolGroup(_)));

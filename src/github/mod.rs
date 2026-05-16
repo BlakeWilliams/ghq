@@ -13,7 +13,6 @@ fn format_octocrab_error(url: &str, err: octocrab::Error) -> anyhow::Error {
     }
 }
 
-#[derive(Clone)]
 pub struct Client {
     octocrab: octocrab::Octocrab,
 }
@@ -58,39 +57,6 @@ impl Client {
         Ok(user)
     }
 
-    pub async fn pull_requests(
-        &self,
-        owner: &str,
-        repo: &str,
-    ) -> Result<Vec<types::PullRequest>> {
-        let prs: Vec<types::PullRequest> = self
-            .octocrab
-            .get(
-                format!("/repos/{owner}/{repo}/pulls"),
-                Some(&[("state", "open"), ("per_page", "100")]),
-            )
-            .await
-            .context("failed to fetch pull requests")?;
-        Ok(prs)
-    }
-
-    pub async fn pull_request(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<types::PullRequest> {
-        let pr: types::PullRequest = self
-            .octocrab
-            .get(
-                format!("/repos/{owner}/{repo}/pulls/{number}"),
-                None::<&()>,
-            )
-            .await
-            .context("failed to fetch pull request")?;
-        Ok(pr)
-    }
-
     pub async fn pull_request_by_branch(
         &self,
         owner: &str,
@@ -108,23 +74,6 @@ impl Client {
         Ok(prs.into_iter().next())
     }
 
-    pub async fn reviews(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<Vec<types::Review>> {
-        let reviews: Vec<types::Review> = self
-            .octocrab
-            .get(
-                format!("/repos/{owner}/{repo}/pulls/{number}/reviews"),
-                None::<&()>,
-            )
-            .await
-            .context("failed to fetch reviews")?;
-        Ok(reviews)
-    }
-
     pub async fn review_comments(
         &self,
         owner: &str,
@@ -140,57 +89,6 @@ impl Client {
             .await
             .context("failed to fetch review comments")?;
         Ok(comments)
-    }
-
-    pub async fn issue_comments(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<Vec<types::IssueComment>> {
-        let comments: Vec<types::IssueComment> = self
-            .octocrab
-            .get(
-                format!("/repos/{owner}/{repo}/issues/{number}/comments"),
-                Some(&[("per_page", "100")]),
-            )
-            .await
-            .context("failed to fetch issue comments")?;
-        Ok(comments)
-    }
-
-    pub async fn pr_files(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<Vec<types::PullRequestFile>> {
-        let files: Vec<types::PullRequestFile> = self
-            .octocrab
-            .get(
-                format!("/repos/{owner}/{repo}/pulls/{number}/files"),
-                Some(&[("per_page", "100")]),
-            )
-            .await
-            .context("failed to fetch PR files")?;
-        Ok(files)
-    }
-
-    pub async fn check_runs(
-        &self,
-        owner: &str,
-        repo: &str,
-        git_ref: &str,
-    ) -> Result<types::CheckRunsResponse> {
-        let resp: types::CheckRunsResponse = self
-            .octocrab
-            .get(
-                format!("/repos/{owner}/{repo}/commits/{git_ref}/check-runs"),
-                None::<&()>,
-            )
-            .await
-            .context("failed to fetch check runs")?;
-        Ok(resp)
     }
 
     pub async fn create_review_comment(

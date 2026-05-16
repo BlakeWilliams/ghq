@@ -8,15 +8,6 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use tokio::process::Command;
 
-pub async fn is_git_repo(dir: &str) -> bool {
-    Command::new("git")
-        .args(["-C", dir, "rev-parse", "--is-inside-work-tree"])
-        .output()
-        .await
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
-        .unwrap_or(false)
-}
-
 pub async fn repo_root(dir: &str) -> Result<String> {
     let output = Command::new("git")
         .args(["-C", dir, "rev-parse", "--show-toplevel"])
@@ -142,20 +133,6 @@ pub async fn resolve_merge_base(dir: &str, base_branch: &str) -> Result<String> 
     merge_base(dir, &branch).await
 }
 
-pub async fn fetch_ref(dir: &str, remote: &str, refspec: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args(["-C", dir, "fetch", remote, refspec])
-        .output()
-        .await?;
-    if !output.status.success() {
-        bail!(
-            "git fetch {remote} {refspec}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    Ok(())
-}
-
 pub async fn local_branches(dir: &str) -> Result<Vec<String>> {
     let output = Command::new("git")
         .args([
@@ -229,43 +206,4 @@ pub async fn untracked_files(dir: &str) -> Result<Vec<String>> {
         return Ok(vec![]);
     }
     Ok(raw.lines().map(|s| s.to_string()).collect())
-}
-
-pub async fn num_stat(
-    dir: &str,
-    mode: diff::DiffMode,
-    base_branch: &str,
-) -> Result<std::collections::HashMap<String, (i32, i32)>> {
-    use std::collections::HashMap;
-
-    let mut args = vec!["-C", dir, "diff", "--numstat", "--no-color"];
-    let merge_base_str;
-    let range_str;
-
-    match mode {
-        diff::DiffMode::Working => {}
-        diff::DiffMode::Staged => {
-            args.insert(3, "--cached");
-        }
-        diff::DiffMode::Branch => {
-            merge_base_str = resolve_merge_base(dir, base_branch).await?;
-            range_str = format!("{merge_base_str}..HEAD");
-            args[3] = &range_str;
-        }
-    }
-
-    let output = Command::new("git")
-        .args(&args)
-        .output()
-        .await?;
-    let mut result = HashMap::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 3 {
-            let adds: i32 = parts[0].parse().unwrap_or(0);
-            let dels: i32 = parts[1].parse().unwrap_or(0);
-            result.insert(parts[2].to_string(), (adds, dels));
-        }
-    }
-    Ok(result)
 }

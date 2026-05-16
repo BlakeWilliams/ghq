@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "==> Running clippy..."
+cargo clippy -- -W clippy::all
+
+echo "==> All checks passed!"

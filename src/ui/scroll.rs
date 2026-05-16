@@ -2,7 +2,6 @@
 /// Implement this to get uniform j/k, Ctrl+D/U, gg/G behavior
 /// without per-component branching in keybinds.
 pub trait Scrollable {
-    fn scroll_state(&self) -> &ScrollState;
     fn scroll_state_mut(&mut self) -> &mut ScrollState;
 
     /// Called before scroll operations to sync total line count.
@@ -78,17 +77,9 @@ impl ScrollState {
         self.scroll_margin = margin;
     }
 
-    pub fn viewport_height(&self) -> usize {
-        self.viewport_height
-    }
-
     pub fn set_total(&mut self, total: usize) {
         self.total = total;
         self.clamp();
-    }
-
-    pub fn total(&self) -> usize {
-        self.total
     }
 
     /// Move cursor down by `n`, keeping it in bounds and syncing viewport.
@@ -155,11 +146,6 @@ impl ScrollState {
     pub fn goto_top(&mut self) {
         self.cursor = 0;
         self.offset = 0;
-    }
-
-    pub fn goto_bottom(&mut self) {
-        self.cursor = self.total.saturating_sub(1);
-        self.sync_viewport();
     }
 
     /// Scroll to the very end — for content-only scrolling (no cursor concept).
@@ -348,7 +334,7 @@ mod tests {
         let mut s = ScrollState::new();
         s.set_viewport_height(10);
         s.set_total(50);
-        s.goto_bottom();
+        s.scroll_to_bottom();
         assert_eq!(s.cursor, 49);
         s.goto_top();
         assert_eq!(s.cursor, 0);

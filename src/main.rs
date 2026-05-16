@@ -1,7 +1,6 @@
 #![allow(clippy::too_many_arguments, clippy::large_enum_variant)]
 
 mod config;
-mod error;
 
 mod agent;
 mod cache;
@@ -43,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
 
     let github_client =
         github::Client::new().context("failed to create GitHub client")?;
-    let cached_client = github::CachedClient::new(github_client);
+    let cached_client = std::sync::Arc::new(github::CachedClient::new(github_client));
 
     let current_branch = git::current_branch(&repo_root).await?;
 

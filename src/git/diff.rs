@@ -141,7 +141,7 @@ pub fn parse_diff_to_files(raw_diff: &str) -> Vec<PullRequestFile> {
             flush_file(&mut current_file, &mut patch_lines, &mut files);
             let a_path = caps.get(1).unwrap().as_str().to_string();
             let b_path = caps.get(2).unwrap().as_str().to_string();
-            let (status, prev) = if a_path != b_path {
+            let (status, _prev) = if a_path != b_path {
                 ("renamed".to_string(), a_path)
             } else {
                 ("modified".to_string(), String::new())
@@ -149,7 +149,6 @@ pub fn parse_diff_to_files(raw_diff: &str) -> Vec<PullRequestFile> {
             current_file = Some(PullRequestFile {
                 filename: b_path,
                 status,
-                previous_filename: prev,
                 patch: String::new(),
                 additions: 0,
                 deletions: 0,
@@ -194,47 +193,4 @@ pub fn parse_diff_to_files(raw_diff: &str) -> Vec<PullRequestFile> {
 
     flush_file(&mut current_file, &mut patch_lines, &mut files);
     files
-}
-
-pub async fn diff_stat(dir: &str, mode: DiffMode, base_branch: &str) -> Result<String> {
-    let mut args: Vec<String> = vec!["-C".into(), dir.into()];
-
-    match mode {
-        DiffMode::Working => {
-            args.extend(["diff".into(), "--stat".into(), "--no-color".into()]);
-        }
-        DiffMode::Staged => {
-            args.extend([
-                "diff".into(),
-                "--cached".into(),
-                "--stat".into(),
-                "--no-color".into(),
-            ]);
-        }
-        DiffMode::Branch => {
-            let mb = super::resolve_merge_base(dir, base_branch).await?;
-            args.extend([
-                "diff".into(),
-                format!("{mb}..HEAD"),
-                "--stat".into(),
-                "--no-color".into(),
-            ]);
-        }
-    }
-
-    let output = Command::new("git").args(&args).output().await?;
-    if output.status.success() || output.status.code() == Some(1) {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
-        bail!(
-            "git diff --stat: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-}
-
-pub fn files_added_deleted_stats(files: &[PullRequestFile]) -> (i32, i32) {
-    files
-        .iter()
-        .fold((0, 0), |(a, d), f| (a + f.additions, d + f.deletions))
 }

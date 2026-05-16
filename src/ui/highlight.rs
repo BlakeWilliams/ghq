@@ -388,31 +388,6 @@ impl Highlighter {
         result
     }
 
-    pub fn highlight_line(&self, line: &str, filename: &str) -> Vec<(Style, String)> {
-        let syntax = self
-            .syntax_set
-            .find_syntax_for_file(filename)
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text());
-
-        let is_rust = syntax.name == "Rust" || syntax.name == "Rust Enhanced";
-        let mut h = HighlightLines::new(syntax, &self.theme);
-        match h.highlight_line(line, &self.syntax_set) {
-            Ok(regions) => {
-                let spans = regions
-                    .into_iter()
-                    .map(|(style, text)| {
-                        let s = self.to_style(style);
-                        (s, text.to_string())
-                    })
-                    .collect();
-                self.patch_rust_keywords(spans, is_rust)
-            }
-            Err(_) => vec![(Style::default(), line.to_string())],
-        }
-    }
-
     /// Highlight a code block by language token (e.g. "rust", "go", "js").
     /// Returns one Vec<(Style, String)> per line.
     pub fn highlight_code_block(&self, code: &str, lang: &str) -> Vec<Vec<(Style, String)>> {

@@ -468,9 +468,6 @@ const MAX_PANEL_WIDTH: u16 = 100;
 const DIFF_MIN_WIDTH: u16 = 90;
 
 impl Scrollable for CommentPanel {
-    fn scroll_state(&self) -> &ScrollState {
-        &self.scroll
-    }
     fn scroll_state_mut(&mut self) -> &mut ScrollState {
         &mut self.scroll
     }
@@ -523,11 +520,6 @@ impl CommentPanel {
             return 0; // too narrow, use fallback
         }
         available.min(MAX_PANEL_WIDTH)
-    }
-
-    /// Returns true when the panel is open but too narrow for side-panel mode.
-    pub fn needs_fallback(&self, available_right: u16) -> bool {
-        self.visible && Self::panel_width(available_right) == 0
     }
 
     pub fn set_reply_view(&mut self, text: String, cursor: usize, mode: ReplyMode) {
@@ -879,55 +871,6 @@ impl CommentPanel {
             border_color,
             false,
         ));
-    }
-
-    pub fn content_line_count(&self) -> usize {
-        if let Some(ref cached) = self.cached_lines {
-            return cached.len();
-        }
-        let body_wrap_w = (self.width as usize).saturating_sub(2);
-        let mut count = 0;
-        if !self.file_path.is_empty() {
-            count += wrap_text(&format!(" {}", self.file_path), self.width as usize).len();
-        }
-        if !self.diff_context.is_empty() {
-            count += self.diff_context.len() + 1;
-        }
-        count += 1;
-        if self.resolved {
-            count += 2;
-        }
-        if !self.comments.is_empty() {
-            for (i, c) in self.comments.iter().enumerate() {
-                count += 1;
-                if c.blocks.is_empty() && c.is_pending {
-                    count += 1;
-                } else {
-                    for block in &c.blocks {
-                        match block {
-                            ContentBlock::Text(text) => {
-                                if !text.is_empty() {
-                                    count += render_markdown(text, body_wrap_w, None).len();
-                                }
-                            }
-                            ContentBlock::ToolGroup(g) => {
-                                if !g.tools.is_empty() {
-                                    count += 2 + g.tools.len();
-                                }
-                            }
-                        }
-                    }
-                }
-                if i < self.comments.len() - 1 {
-                    count += 3;
-                }
-            }
-            count += 1;
-        }
-        if let Some(reply) = &self.reply_view {
-            count += self.count_reply_lines(reply, body_wrap_w);
-        }
-        count
     }
 }
 

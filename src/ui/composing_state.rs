@@ -41,17 +41,6 @@ impl ComposingState {
         self.reply_mode = ReplyMode::Copilot;
     }
 
-    pub fn start_reply(&mut self, reply_to: String, path: String, line: i32, side: String) {
-        self.active = true;
-        self.input.clear();
-        self.cursor = 0;
-        self.path = path;
-        self.line = line;
-        self.side = side;
-        self.reply_to = Some(reply_to);
-        self.reply_mode = ReplyMode::Copilot;
-    }
-
     pub fn start_reply_with_mode(&mut self, reply_to: String, path: String, line: i32, side: String, mode: ReplyMode) {
         self.active = true;
         self.input.clear();
@@ -201,12 +190,10 @@ fn offset_from_row_col(s: &str, row: usize, col: usize) -> usize {
     let mut offset = 0;
     for (i, line) in s.split('\n').enumerate() {
         if i == row {
-            let mut char_count = 0;
-            for (byte_offset, _) in line.char_indices() {
+            for (char_count, (byte_offset, _)) in line.char_indices().enumerate() {
                 if char_count == col {
                     return offset + byte_offset;
                 }
-                char_count += 1;
             }
             return offset + line.len();
         }
@@ -241,14 +228,6 @@ mod tests {
         assert_eq!(state.line, 10);
         assert_eq!(state.side, "RIGHT");
         assert!(state.reply_to.is_none());
-    }
-
-    #[test]
-    fn start_reply_sets_reply_to() {
-        let mut state = ComposingState::new();
-        state.start_reply("parent-id".into(), "file.rs".into(), 5, "LEFT".into());
-        assert!(state.is_active());
-        assert_eq!(state.reply_to.as_deref(), Some("parent-id"));
     }
 
     #[test]

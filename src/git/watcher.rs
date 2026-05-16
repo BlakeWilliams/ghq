@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -146,9 +145,6 @@ impl RepoWatcher {
         })
     }
 
-    pub fn close(&self) {
-        self.shutdown.notify_one();
-    }
 }
 
 impl Drop for RepoWatcher {
@@ -166,19 +162,4 @@ fn read_branch(repo_root: &Path) -> Option<String> {
     let data = std::fs::read_to_string(repo_root.join(".git").join("HEAD")).ok()?;
     let trimmed = data.trim();
     trimmed.strip_prefix("ref: refs/heads/").map(|s| s.to_string())
-}
-
-/// Extract unique parent directories from file paths.
-pub fn dirs_from_files(filenames: &[String]) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut dirs = Vec::new();
-    for f in filenames {
-        if let Some(parent) = Path::new(f).parent() {
-            let dir = parent.to_string_lossy().to_string();
-            if seen.insert(dir.clone()) {
-                dirs.push(dir);
-            }
-        }
-    }
-    dirs
 }

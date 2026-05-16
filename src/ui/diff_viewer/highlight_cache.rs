@@ -75,7 +75,7 @@ impl HighlightManager {
         use super::render_list::LineType;
 
         for item in render_list.items_mut() {
-            if let RenderItem::DiffLine(dl) = item {
+            let RenderItem::DiffLine(dl) = item; {
                 match dl.line_type {
                     LineType::Add | LineType::Context => {
                         if let Some(ln) = dl.new_line_no {
@@ -97,11 +97,6 @@ impl HighlightManager {
                 }
             }
         }
-    }
-
-    /// Invalidate cached highlights for a single file.
-    pub fn invalidate(&mut self, filename: &str) {
-        self.cache.remove(filename);
     }
 
     /// Clear all cached highlights.

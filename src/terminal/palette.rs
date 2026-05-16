@@ -1,5 +1,3 @@
-use ratatui::style::Color;
-
 pub struct Palette {
     pub colors: [Option<(u8, u8, u8)>; 16],
     ready_count: usize,
@@ -18,17 +16,6 @@ impl Palette {
             self.colors[index] = Some((r, g, b));
             self.ready_count = self.colors.iter().filter(|c| c.is_some()).count();
         }
-    }
-
-    pub fn get(&self, index: usize) -> Option<Color> {
-        self.colors
-            .get(index)
-            .and_then(|c| *c)
-            .map(|(r, g, b)| Color::Rgb(r, g, b))
-    }
-
-    pub fn ready(&self) -> bool {
-        self.ready_count == 16
     }
 
     pub fn complete(&self) -> bool {

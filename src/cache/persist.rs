@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::Serialize;
 
 pub fn dir() -> Result<PathBuf> {
     let base = dirs::cache_dir()
@@ -17,14 +17,4 @@ pub fn save<T: Serialize>(filename: &str, data: &T) -> Result<()> {
     let json = serde_json::to_string_pretty(data)?;
     std::fs::write(path, json)?;
     Ok(())
-}
-
-pub fn load<T: DeserializeOwned>(filename: &str) -> Result<Option<T>> {
-    let path = dir()?.join(filename);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let data = std::fs::read_to_string(path)?;
-    let parsed = serde_json::from_str(&data)?;
-    Ok(Some(parsed))
 }

@@ -82,18 +82,13 @@ impl SessionHandler for GgHandler {
                             payload: EventPayload::Tool(ToolPayload {
                                 tool_name: data.tool_name,
                                 args_summary,
-                                result: None,
                             }),
                         })
                         .await;
                 }
             }
             SessionEventType::ToolExecutionComplete => {
-                if let Some(data) = event.typed_data::<ToolExecutionCompleteData>() {
-                    let result_text = data
-                        .result
-                        .as_ref()
-                        .map(|r| r.content.clone());
+                if let Some(_data) = event.typed_data::<ToolExecutionCompleteData>() {
                     let _ = self
                         .events_tx
                         .send(AgentEvent {
@@ -102,7 +97,6 @@ impl SessionHandler for GgHandler {
                             payload: EventPayload::Tool(ToolPayload {
                                 tool_name: String::new(),
                                 args_summary: String::new(),
-                                result: result_text,
                             }),
                         })
                         .await;

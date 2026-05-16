@@ -71,14 +71,6 @@ impl CommentStore {
         }
     }
 
-    pub fn load(&mut self) -> anyhow::Result<()> {
-        let filename = format!("comments-{}.json", self.repo_key);
-        if let Some(loaded) = crate::cache::persist::load::<Vec<LocalComment>>(&filename)? {
-            self.comments = loaded;
-        }
-        Ok(())
-    }
-
     pub fn save(&self) -> anyhow::Result<()> {
         let filename = format!("comments-{}.json", self.repo_key);
         crate::cache::persist::save(&filename, &self.comments)?;
@@ -172,13 +164,6 @@ impl CommentStore {
         self.thread_comments(root_id)
             .iter()
             .any(|c| matches!(c.author, CommentAuthor::Copilot))
-    }
-
-    pub fn comments_for_file(&self, path: &str) -> Vec<&LocalComment> {
-        self.comments
-            .iter()
-            .filter(|c| c.path == path && !c.resolved)
-            .collect()
     }
 
     /// Returns root comments for a file, grouped by (side, line).
@@ -311,32 +296,6 @@ mod tests {
     }
 
     #[test]
-    fn comments_for_file_filters() {
-        let mut store = memory_store();
-        store.comments.push(make_comment("c1", "a", CommentAuthor::You, None));
-        let mut c2 = make_comment("c2", "b", CommentAuthor::You, None);
-        c2.path = "other.rs".to_string();
-        store.comments.push(c2);
-
-        let file_comments = store.comments_for_file("file.rs");
-        assert_eq!(file_comments.len(), 1);
-        assert_eq!(file_comments[0].id, "c1");
-    }
-
-    #[test]
-    fn comments_for_file_excludes_resolved() {
-        let mut store = memory_store();
-        let mut c = make_comment("c1", "resolved", CommentAuthor::You, None);
-        c.resolved = true;
-        store.comments.push(c);
-        store.comments.push(make_comment("c2", "open", CommentAuthor::You, None));
-
-        let file_comments = store.comments_for_file("file.rs");
-        assert_eq!(file_comments.len(), 1);
-        assert_eq!(file_comments[0].id, "c2");
-    }
-
-    #[test]
     fn resolve_marks_direct_replies() {
         let mut store = memory_store();
         store.comments.push(make_comment("c1", "root", CommentAuthor::You, None));
@@ -442,19 +401,15 @@ mod tests {
             id,
             user: User {
                 login: "octocat".to_string(),
-                id: Some(1),
-                avatar_url: None,
             },
             body: body.to_string(),
             path: path.to_string(),
             line: Some(line),
             original_line: None,
             side: Some("RIGHT".to_string()),
-            diff_hunk: None,
             in_reply_to_id: reply_to,
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: None,
-            html_url: None,
         }
     }
 

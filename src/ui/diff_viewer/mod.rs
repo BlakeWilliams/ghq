@@ -28,7 +28,6 @@ pub struct LayoutInfo {
     pub mode: DiffMode,
     pub branch_name: String,
     pub file_count: usize,
-    pub current_file_idx: usize,
     pub current_filename: String,
     pub additions: i32,
     pub deletions: i32,
@@ -62,21 +61,6 @@ fn spans_width(spans: &[Span]) -> usize {
         .iter()
         .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
         .sum()
-}
-
-fn truncate_str(s: &str, max_width: usize) -> String {
-    use unicode_width::UnicodeWidthChar;
-    let mut w = 0;
-    let mut result = String::new();
-    for c in s.chars() {
-        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
-        if w + cw > max_width {
-            break;
-        }
-        result.push(c);
-        w += cw;
-    }
-    result
 }
 
 /// Powerline rounded caps for badge pills.
@@ -220,9 +204,6 @@ impl DiffViewer {
 }
 
 impl Scrollable for DiffViewer {
-    fn scroll_state(&self) -> &ScrollState {
-        &self.scroll
-    }
     fn scroll_state_mut(&mut self) -> &mut ScrollState {
         &mut self.scroll
     }
@@ -255,10 +236,6 @@ impl DiffViewer {
         filename: &str,
     ) {
         self.highlights.apply(&mut self.render_list, hl_new, hl_old, filename);
-    }
-
-    pub fn invalidate_highlight_cache(&mut self, filename: &str) {
-        self.highlights.invalidate(filename);
     }
 
     pub fn clear_highlight_cache(&mut self) {
@@ -788,46 +765,7 @@ impl DiffViewer {
 
         match item {
             RenderItem::DiffLine(dl) => self.render_diff_line_row(dl, idx, width, colors),
-            RenderItem::CommentThread(thread) => {
-                self.render_thread_row(thread, idx, width, colors)
-            }
         }
-    }
-
-    fn render_thread_row(
-        &self,
-        thread: &render_list::CommentThreadData,
-        idx: usize,
-        width: usize,
-        colors: &DiffColors,
-    ) -> Line<'static> {
-        let is_cursor = idx == self.scroll.cursor;
-        let bg = if is_cursor {
-            colors.cursor_bg
-        } else {
-            Color::Reset
-        };
-
-        let icon = if thread.has_pending {
-            "⟳"
-        } else if thread.resolved {
-            "✓"
-        } else {
-            "●"
-        };
-
-        let label = format!(
-            " {icon} {} comment{}",
-            thread.comment_count,
-            if thread.comment_count == 1 { "" } else { "s" }
-        );
-        let used = UnicodeWidthStr::width(label.as_str());
-        let pad = width.saturating_sub(used);
-
-        Line::from(vec![
-            Span::styled(label, Style::default().fg(Color::Cyan).bg(bg)),
-            Span::styled(" ".repeat(pad), Style::default().bg(bg)),
-        ])
     }
 
     fn render_diff_line_row(

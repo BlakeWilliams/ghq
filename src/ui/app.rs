@@ -38,8 +38,7 @@ pub struct App {
     pub owner: String,
     pub repo: String,
     pub branch: String,
-    pub config: Config,
-    pub github: CachedClient,
+    pub github: Arc<CachedClient>,
     pub username: Option<String>,
     pub active_view: ActiveView,
     pub local_diff: LocalDiff,
@@ -63,7 +62,7 @@ impl App {
         repo: String,
         branch: String,
         config: Config,
-        github: CachedClient,
+        github: Arc<CachedClient>,
     ) -> Self {
         let diff_colors = DiffColors::default();
         let (diff_tx, diff_rx) = mpsc::unbounded_channel();
@@ -88,7 +87,6 @@ impl App {
             owner,
             repo,
             branch,
-            config,
             github,
             username: None,
             active_view: ActiveView::LocalDiff,
@@ -232,6 +230,17 @@ impl App {
         // Periodic review comment refresh (every 60s when a PR is detected)
         let mut comment_refresh = interval(Duration::from_secs(60));
         comment_refresh.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+        // Background cache GC task (every 30s, evicts entries untouched for 5m)
+        let gc_client = self.github.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(gc_client.gc_interval());
+            tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                gc_client.gc().await;
+            }
+        });
 
         // Schedule the initial draw.
         redraw.notify_one();

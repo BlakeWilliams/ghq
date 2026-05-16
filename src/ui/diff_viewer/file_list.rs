@@ -104,29 +104,6 @@ impl FileList {
         UpdateResult::Reset
     }
 
-    pub fn current_filename(&self) -> String {
-        self.files
-            .get(self.current_file_idx)
-            .map(|f| f.filename.clone())
-            .unwrap_or_default()
-    }
-
-    pub fn next_file(&mut self) {
-        if !self.files.is_empty() {
-            self.current_file_idx = (self.current_file_idx + 1) % self.files.len();
-        }
-    }
-
-    pub fn prev_file(&mut self) {
-        if !self.files.is_empty() {
-            if self.current_file_idx == 0 {
-                self.current_file_idx = self.files.len() - 1;
-            } else {
-                self.current_file_idx -= 1;
-            }
-        }
-    }
-
     /// Sync tree cursor to match current_file_idx.
     pub fn sync_cursor(&mut self) {
         for (i, entry) in self.entries.iter().enumerate() {
@@ -272,7 +249,6 @@ mod tests {
             additions: add,
             deletions: del,
             patch: String::new(),
-            previous_filename: String::new(),
         }
     }
 

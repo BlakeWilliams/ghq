@@ -414,12 +414,10 @@ fn offset_from_row_col(s: &str, row: usize, col: usize) -> usize {
     let mut offset = 0;
     for (i, line) in s.split('\n').enumerate() {
         if i == row {
-            let mut char_count = 0;
-            for (byte_offset, _) in line.char_indices() {
+            for (char_count, (byte_offset, _)) in line.char_indices().enumerate() {
                 if char_count == col {
                     return offset + byte_offset;
                 }
-                char_count += 1;
             }
             // col is past end of line — clamp to end
             return offset + line.len();

@@ -71,7 +71,7 @@ pub struct LocalDiff {
     pub highlight_rx: mpsc::UnboundedReceiver<HighlightResult>,
     pub github_tx: mpsc::UnboundedSender<GithubEvent>,
     pub github_rx: mpsc::UnboundedReceiver<GithubEvent>,
-    pub github: Option<CachedClient>,
+    pub github: Option<Arc<CachedClient>>,
     pub owner: String,
     pub repo_name: String,
     pub colors: DiffColors,
@@ -167,7 +167,7 @@ impl LocalDiff {
     }
 
     /// Fetch the PR associated with the current branch in the background.
-    pub fn fetch_pr(&self, github: &CachedClient, owner: &str, repo: &str) {
+    pub fn fetch_pr(&self, github: &Arc<CachedClient>, owner: &str, repo: &str) {
         let github = github.clone();
         let owner = owner.to_string();
         let repo = repo.to_string();
@@ -190,7 +190,7 @@ impl LocalDiff {
     }
 
     /// Fetch review comments for the detected PR in the background.
-    pub fn fetch_review_comments(&self, github: &CachedClient, owner: &str, repo: &str) {
+    pub fn fetch_review_comments(&self, github: &Arc<CachedClient>, owner: &str, repo: &str) {
         let Some(pr) = &self.pr else { return };
         let number = pr.number;
         let github = github.clone();
@@ -211,7 +211,7 @@ impl LocalDiff {
     }
 
     /// Handle a GitHub event arriving from a background fetch.
-    pub async fn handle_github_event(&mut self, event: GithubEvent, github: &CachedClient, _owner: &str, _repo: &str) {
+    pub async fn handle_github_event(&mut self, event: GithubEvent, github: &Arc<CachedClient>, _owner: &str, _repo: &str) {
         match event {
             GithubEvent::PrDetected(pr) => {
                 self.merge_base_ref = format!("origin/{}", pr.base.ref_name);
@@ -411,40 +411,8 @@ impl LocalDiff {
         Pane::Diff
     }
 
-    pub fn move_tree_cursor_up(&mut self) {
-        keybinds::move_tree_cursor(self, -1);
-    }
-
-    pub fn move_tree_cursor_down(&mut self) {
-        keybinds::move_tree_cursor(self, 1);
-    }
-
     pub async fn handle_key(&mut self, key: KeyEvent, repo_root: &str, agent: &Arc<dyn AgentRunner>) -> Option<String> {
         keybinds::handle_key(self, key, repo_root, agent).await
-    }
-
-    pub async fn next_file(&mut self) {
-        if !self.viewer.file_list.files.is_empty() {
-            self.viewer.file_list.current_file_idx = (self.viewer.file_list.current_file_idx + 1) % self.viewer.file_list.files.len();
-            self.viewer.scroll.cursor = 0;
-            self.viewer.scroll.offset = 0;
-            self.viewer.file_list.sync_cursor();
-            self.refresh_current_file(false).await;
-        }
-    }
-
-    pub async fn prev_file(&mut self) {
-        if !self.viewer.file_list.files.is_empty() {
-            if self.viewer.file_list.current_file_idx == 0 {
-                self.viewer.file_list.current_file_idx = self.viewer.file_list.files.len() - 1;
-            } else {
-                self.viewer.file_list.current_file_idx -= 1;
-            }
-            self.viewer.scroll.cursor = 0;
-            self.viewer.scroll.offset = 0;
-            self.viewer.file_list.sync_cursor();
-            self.refresh_current_file(false).await;
-        }
     }
 
     pub fn cycle_mode(&mut self, is_default_branch: bool) {
@@ -879,9 +847,35 @@ impl LocalDiff {
 
         if reply_mode == panel::ReplyMode::Copilot {
             let diff_hunk = self.build_diff_context(self.viewer.scroll.cursor);
+
+            // Build conversation history from prior thread comments
+            let thread_comments = self.comment_store.thread_comments(&root_id);
+            let history = if thread_comments.is_empty() {
+                String::new()
+            } else {
+                let mut parts = Vec::new();
+                for c in &thread_comments {
+                    let author = match &c.author {
+                        CommentAuthor::You => "User",
+                        CommentAuthor::Copilot => "Copilot",
+                        CommentAuthor::GitHub(name) => name.as_str(),
+                    };
+                    let text = if !c.body.is_empty() {
+                        c.body.clone()
+                    } else {
+                        c.blocks.iter().filter_map(|b| match b {
+                            ContentBlock::Text { content } => Some(content.clone()),
+                            _ => None,
+                        }).collect::<Vec<_>>().join("\n")
+                    };
+                    parts.push(format!("**{author}**: {text}"));
+                }
+                format!("\n\nThread history:\n{}\n", parts.join("\n\n"))
+            };
+
             let prompt = format!(
-                "The user left a comment on `{}` line {} ({}):\n\n{}\n\nDiff context:\n```\n{}\n```\n\nPlease provide a helpful response.",
-                path, line, side, body, diff_hunk
+                "The user left a comment on `{}` line {} ({}):\n\n{}\n\nDiff context:\n```\n{}\n```{}\n\nPlease provide a helpful response.",
+                path, line, side, body, diff_hunk, history
             );
 
             self.copilot_state
@@ -955,7 +949,6 @@ impl LocalDiff {
             mode: self.mode,
             branch_name: self.base_branch.clone(),
             file_count: self.viewer.file_list.files.len(),
-            current_file_idx: self.viewer.file_list.current_file_idx,
             current_filename: file.map(|f| f.filename.clone()).unwrap_or_default(),
             additions: file.map(|f| f.additions).unwrap_or(0),
             deletions: file.map(|f| f.deletions).unwrap_or(0),

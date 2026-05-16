@@ -189,7 +189,20 @@ impl CommitOverlay {
     }
 
     pub fn finish_generation(&mut self) {
-        self.input = self.generating_message.trim().to_string();
+        let mut msg = self.generating_message.trim().to_string();
+        // Strip markdown code fences the LLM sometimes wraps commit messages in
+        if msg.starts_with("```") {
+            // Remove opening fence line (e.g. "```\n" or "```text\n")
+            if let Some(pos) = msg.find('\n') {
+                msg = msg[pos + 1..].to_string();
+            }
+            // Remove closing fence
+            if let Some(pos) = msg.rfind("```") {
+                msg = msg[..pos].to_string();
+            }
+            msg = msg.trim().to_string();
+        }
+        self.input = msg;
         self.cursor = self.input.len();
         self.phase = CommitPhase::Editing;
     }

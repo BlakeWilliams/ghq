@@ -8,6 +8,8 @@ pub struct FileTreeEntry {
     pub display: String,
     pub depth: usize,
     pub is_dir: bool,
+    /// Aggregated status: "added" if all children added, "removed" if all removed, else "modified"
+    pub status: String,
 }
 
 pub fn build_file_tree(files: &[PullRequestFile]) -> Vec<FileTreeEntry> {
@@ -78,20 +80,47 @@ pub fn build_file_tree(files: &[PullRequestFile]) -> Vec<FileTreeEntry> {
     }
     collapse(&mut root);
 
+    // Compute aggregate status for a subtree: "added" if all files added,
+    // "removed" if all removed, otherwise "modified".
+    fn aggregate_status(node: &TreeNode, files: &[PullRequestFile]) -> String {
+        let mut all_added = true;
+        let mut all_removed = true;
+
+        for (_, idx) in &node.files {
+            let s = files[*idx].status.as_str();
+            if s != "added" { all_added = false; }
+            if s != "removed" { all_removed = false; }
+        }
+
+        for key in &node.order {
+            if let Some(child) = node.children.get(key) {
+                let child_status = aggregate_status(child, files);
+                if child_status != "added" { all_added = false; }
+                if child_status != "removed" { all_removed = false; }
+            }
+        }
+
+        // Empty nodes (shouldn't happen) default to modified
+        if !all_added && !all_removed { return "modified".to_string(); }
+        if all_added { "added".to_string() } else { "removed".to_string() }
+    }
+
     // Flatten into entries
     let mut entries = Vec::new();
-    fn walk(node: &TreeNode, depth: usize, entries: &mut Vec<FileTreeEntry>) {
+    fn walk(node: &TreeNode, depth: usize, entries: &mut Vec<FileTreeEntry>, files: &[PullRequestFile]) {
         let mut dirs: Vec<&str> = node.order.iter().map(|s| s.as_str()).collect();
         dirs.sort();
         for key in dirs {
             if let Some(child) = node.children.get(key) {
+                let status = aggregate_status(child, files);
                 entries.push(FileTreeEntry {
                     file_index: -1,
                     display: format!("{key}/"),
                     depth,
                     is_dir: true,
+                    status,
                 });
-                walk(child, depth + 1, entries);
+                walk(child, depth + 1, entries, files);
             }
         }
         for (name, file_idx) in &node.files {
@@ -100,10 +129,11 @@ pub fn build_file_tree(files: &[PullRequestFile]) -> Vec<FileTreeEntry> {
                 display: name.clone(),
                 depth,
                 is_dir: false,
+                status: files[*file_idx].status.clone(),
             });
         }
     }
-    walk(&root, 0, &mut entries);
+    walk(&root, 0, &mut entries, files);
 
     entries
 }

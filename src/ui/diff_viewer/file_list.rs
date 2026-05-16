@@ -148,10 +148,15 @@ impl FileList {
 
         if entry.is_dir {
             let text = format!("  {depth_pad}{}", entry.display);
+            let color = match entry.status.as_str() {
+                "added" => Color::Green,
+                "removed" => Color::Red,
+                _ => Color::Blue,
+            };
             spans.push(Span::styled(
                 text,
                 Style::default()
-                    .fg(Color::Blue)
+                    .fg(color)
                     .add_modifier(Modifier::BOLD),
             ));
         } else {
@@ -162,7 +167,11 @@ impl FileList {
                     .fg(Color::Magenta)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default()
+                match entry.status.as_str() {
+                    "added" => Style::default().fg(Color::Green),
+                    "removed" => Style::default().fg(Color::Red),
+                    _ => Style::default(),
+                }
             };
             spans.push(Span::styled(
                 format!("{depth_pad}{prefix}{name}"),

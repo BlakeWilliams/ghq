@@ -544,9 +544,9 @@ async fn handle_picker_key(local_diff: &mut LocalDiff, key: KeyEvent, repo_root:
                         if let Some(idx) = local_diff.viewer.file_list.files.iter()
                             .position(|f| f.filename == item.value)
                         {
+                            local_diff.viewer.save_file_position();
                             local_diff.viewer.file_list.current_file_idx = idx;
-                            local_diff.viewer.scroll.cursor = 0;
-                            local_diff.viewer.scroll.offset = 0;
+                            local_diff.viewer.restore_file_position();
                             local_diff.refresh_current_file(false).await;
                             // Sync file list cursor to match
                             if let Some(entry_idx) = local_diff.viewer.file_list.entries.iter()
@@ -642,9 +642,11 @@ async fn select_tree_entry(local_diff: &mut LocalDiff) {
     if file_idx >= local_diff.viewer.file_list.files.len() {
         return;
     }
+    // Save position for the file we're leaving
+    local_diff.viewer.save_file_position();
     local_diff.viewer.file_list.current_file_idx = file_idx;
-    local_diff.viewer.scroll.cursor = 0;
-    local_diff.viewer.scroll.offset = 0;
+    // Restore position for the file we're entering
+    local_diff.viewer.restore_file_position();
     local_diff.refresh_current_file(false).await;
 }
 

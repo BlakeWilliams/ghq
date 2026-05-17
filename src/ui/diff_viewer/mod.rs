@@ -4,6 +4,8 @@ pub mod panel;
 pub mod render_list;
 pub mod search;
 
+use std::collections::HashMap;
+
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -54,6 +56,7 @@ pub struct DiffViewer {
     pub dots_frame: usize,
     pub waiting_g: bool,
     pub pending_bracket: Option<char>,
+    file_positions: HashMap<usize, (usize, usize)>,
 }
 
 fn spans_width(spans: &[Span]) -> usize {
@@ -175,11 +178,28 @@ impl DiffViewer {
             dots_frame: 0,
             waiting_g: false,
             pending_bracket: None,
+            file_positions: HashMap::new(),
         }
     }
 
     pub fn viewport_height(&self) -> u16 {
         self.height.saturating_sub(CHROME_ROWS)
+    }
+
+    pub fn save_file_position(&mut self) {
+        let idx = self.file_list.current_file_idx;
+        self.file_positions.insert(idx, (self.scroll.cursor, self.scroll.offset));
+    }
+
+    pub fn restore_file_position(&mut self) {
+        let idx = self.file_list.current_file_idx;
+        if let Some(&(cursor, offset)) = self.file_positions.get(&idx) {
+            self.scroll.cursor = cursor;
+            self.scroll.offset = offset;
+        } else {
+            self.scroll.cursor = 0;
+            self.scroll.offset = 0;
+        }
     }
 
     pub fn is_selected(&self, idx: usize) -> bool {
